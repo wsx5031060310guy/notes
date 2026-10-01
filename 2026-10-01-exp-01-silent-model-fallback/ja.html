@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>私の AI エージェントは4週間、小さなモデルでひっそり動いていました</title></head>
+<body>
+<h1>私の AI エージェントは4週間、小さなモデルでひっそり動いていました</h1>
+<figure><img src="https://image.pollinations.ai/prompt/a%20clean%20flat%20isometric%20technical%20illustration%20of%20an%20AI%20agent%20fallback%20chain%20with%20scheduled%20jobs%2C%20a%20primary%20model%2C%20a%20smaller%20backup%20model%2C%20monitoring%20gauges%2C%20and%20a%20message%20delivery%20pipeline%2C%20no%20text%2C%20no%20logos%2C%20no%20real%20people%2C%20no%20company%20or%20product%20names?width=1200&amp;height=630&amp;seed=20261001&amp;nologo=true" alt="AI生成のイラスト"><figcaption>AI生成のイラスト</figcaption></figure>
+<p>この記事では、正常に見える fallback chain が定期実行する AI ジョブの深刻な品質低下を隠していた経験を紹介します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul>
+<li>はじめに</li><li>概要</li><li>障害が見えなかった理由</li><li>調査の流れ</li><li>利点と欠点</li><li>修正</li><li>まとめ</li><li>今後</li><li>参考</li>
+</ul>
+<h3>はじめに</h3>
+<p>私は self-hosted の AI agent framework を運用しています。約二十件の定期ジョブがあり、レポート、監査、要約を作成して Telegram に届けます。</p>
+<p>システムには主要な language model と fallback chain がありました。この設計は合理的に見えました。主要モデルが利用できないとき、小さなモデルへ切り替えれば、scheduler は止まらず、レポートも届き続けます。</p>
+<p>実際に切り替えは動きました。しかし、望んだ形ではありませんでした。provider が主要モデルを廃止したため、すべての呼び出しが HTTP 400 の「model not supported」を返しました。framework はそのエラーを処理し、全リクエストを小さな flash-lite class のモデルへ黙って切り替えました。</p>
+<p>ジョブの状態は green のままでした。メッセージも届きました。alert は一度も発生しませんでした。外から見ると、自動化は正常でした。</p>
+<h3>概要</h3>
+<p>fallback chain を入れると、「成功」の意味が変わります。fallback がなければ、モデルを利用できない状態は明確な失敗になります。fallback があれば、同じ障害でも別のモデルから有効な形式の応答を得られます。通信は成功しますが、品質の特性は変化しているかもしれません。</p>
+<p>定期ジョブでは、この違いが重要です。対話型 chat の利用者なら、回答が弱くなったと感じる可能性があります。しかし cron job は品質を判断しません。完了した応答を受け取り、保存し、次の処理へ進むだけです。</p>
+<p>私の監視は、ジョブが完了したか、Telegram にメッセージが届いたかを見ていました。実際にどのモデルが回答したかは見ていませんでした。fallback の繰り返しも incident として扱っていませんでした。つまり、配信は計測していましたが、実行主体を無視していました。</p>
+<figure><img src="https://mermaid.ink/img/Zmxvd2NoYXJ0IFRECiAgICBBW-Wumuacn-OCuOODp-ODlumWi-Wni10gLS0-IEJb5Li76KaB44Oi44OH44Or44KS5ZG844G2XQogICAgQiAtLT4gQ3vkuLvopoHjg6Ljg4fjg6vjgYzlv5znrZQ_fQogICAgQyAtLSDjgYTjgYTjgYg6IEhUVFAgNDAwIC0tPiBEW-S7o-abv-ODouODh-ODq-OBjOW_nOetlF0KICAgIEMgLS0g44Gv44GEIC0tPiBFW-Wun-mam-OBruODouODh-ODq-OCkuiomOmMsl0KICAgIEQgLS0-IEUKICAgIEUgLS0-IEZb57WQ5p6c44KS6YWN5L-hXQogICAgRSAtLT4gR3vku6Pmm7_njofjgYzpq5jjgYQ_fQogICAgRyAtLSDjga_jgYQgLS0-IEhb6YGL55So6ICF44G46YCa55-lXQogICAgRiAtLT4gSXvlh7rlipvkuIrpmZDjgpLotoXpgY4_fQogICAgSSAtLSDjga_jgYQgLS0-IEpb5q6L44KK44KS44OV44Kh44Kk44Or5L-d5a2YXQogICAgSSAtLSDjgYTjgYTjgYggLS0-IEtb44Oh44OD44K744O844K46YCB5L-hXQo=?type=png" alt="改善案：モデルの切り替え監視と安全なメッセージ配信の流れ"><figcaption>改善案：実際に回答したモデルを記録し、fallback の利用が続いたら通知し、配信量を制限する流れです。現時点で導入済みなのは、モデルの切り替えと配信量の上限だけです。</figcaption></figure>
+<h3>障害が見えなかった理由</h3>
+<h4>Green status の定義が狭すぎました</h4>
+<p>scheduler は、最終的にリクエストが返り、配信が完了すれば成功と判断していました。fallback model の応答でも、この条件を満たします。dashboard の表示は技術的には正しかったのですが、成功の定義が不十分でした。</p>
+<p>簡単な health check も「PONG」を返していました。これは、どれかのモデルが短い prompt に答えられることを示すだけです。主要モデルが利用可能であることも、定期ジョブが意図した能力を使っていることも証明しません。確認していたのは到達性であり、契約全体ではありませんでした。</p>
+<h4>品質低下は後から現れました</h4>
+<p>明確な症状が現れたのは数週間後です。日次の web performance job が loop に入り、偽の tool call を並べた約三十六万文字の transcript を生成しました。chat adapter はそれを約二百件の Telegram message に分割し、最後には Telegram の flood control に達しました。</p>
+<p>別の症状は investment journal に現れました。Bitcoin の価格を実際の価格から約十一パーセントずれた値で報告しました。それぞれを単独で見ると、別々の content problem に見えます。しかし一緒に考えると、実行環境そのものが変わった可能性が見えてきます。</p>
+<p>危険なのは時間差です。モデルの停止が先に始まり、目立つ品質問題が後から出ました。明白な job failure だけを通知する仕組みでは、silent degradation が多くのタスクへ広がる時間を与えてしまいます。</p>
+<h3>調査の流れ</h3>
+<p>私は scheduler status だけを見るのをやめ、framework の session database を調べました。model column には、各 scheduled session を実際に処理したモデルが記録されていました。</p>
+<p>結果を見ると、パターンは明確でした。九月上旬以降のすべての scheduled session に fallback model が記録されていました。主要モデルの呼び出しは生成前に失敗していたため、serving model として主要モデル名が現れていませんでした。</p>
+<p>この調査は、「ジョブは何かを返したか」ではなく、「配信した内容をどのモデルが生成したか」という、より良い質問に答えました。私に欠けていた証拠はこれでした。</p>
+<p>同じようなシステムなら、次の項目をまとめて確認します。</p>
+<ul>
+<li>要求したモデル</li><li>実際に回答したモデル</li><li>fallback の理由</li><li>job または session の識別子</li><li>最終的な配信量と配信結果</li>
+</ul>
+<p>これらを記録すれば、provider failure、fallback behavior、content quality、delivery pressure を分けて考えられます。一つの green status だけでは、すべてを表現できません。</p>
+<h3>利点と欠点</h3>
+<h4>利点</h4>
+<p>fallback chain は可用性を守りました。主要モデルが廃止されても、すべての report や summary が消えたわけではありません。一時的な rate limit や短い provider outage なら、この動作は役立ちます。システムを制御された形で継続できます。</p>
+<p>fallback は調査時間も作ります。すべての downstream task が同時に失敗する前に、operator が主要経路を修復できます。出力のリスクが低く、代替モデルでも用途を満たせる場合には有効です。</p>
+<h4>欠点</h4>
+<p>fallback は大きな障害を silent quality decay に変えることがあります。scheduler には成功、chat adapter には text、受信者には message が見えます。しかし、どれも意図したモデルが処理した証明ではありません。</p>
+<p>小さなモデルは別の失敗をする可能性もあります。loop に入る、事実の信頼性が下がる、tool を正しく使う代わりに tool call を模倣する、といった問題です。fallback 自体が悪いのではありません。degraded operation に label、budget、alert がないことが問題です。</p>
+<h3>修正</h3>
+<p>まず主要モデルを切り替え、scheduled job が provider に対応したモデルを使えるようにしました。これで HTTP 400 の直接原因を取り除きました。</p>
+<p>次に chunking chat adapter へ hard cap を追加しました。chat message として配信するのは最大一万二千文字です。それより長い場合、残りはファイルへ保存し、リンクを送ります。model の loop 自体は直りませんが、一つの悪い応答が数百件の message になることを防げます。</p>
+<p>さらに重要な教訓は fallback rate を監視することです。一回の切り替えは正常かもしれません。しかし多くの scheduled session で継続していれば、最終的に text が返っていても主要経路は不健康です。</p>
+<p>現在なら、運用上の契約を次のように定義します。</p>
+<ol>
+<li>すべての session で要求モデルと実モデルを記録します。</li><li>job と理由ごとに fallback event を数えます。</li><li>fallback が継続または広範囲になれば通知します。</li><li>受信者が知るべき場合は degraded output と表示します。</li><li>model output とは別に delivery volume を制限します。</li><li>どのモデルでも返せる「PONG」ではなく、主要経路を直接確認します。</li>
+</ol>
+<p>これらは別々の failure boundary を守ります。model telemetry は routing problem を検出し、output cap は delivery channel を保護し、direct health check は意図した dependency を検証します。</p>
+<h3>まとめ</h3>
+<p>私の自動化は明確に停止しませんでした。もっと危険な形で、もっともらしい出力を作り続けました。赤い job よりも、system を信頼させる静かな失敗のほうが危険でした。</p>
+<p>fallback chain は availability feature だけではありません。degraded operating mode です。応答が存在するかだけでなく、意図したモデルが答えたか、どれだけ頻繁に切り替わったか、配信量が安全な範囲かを観測する必要があります。</p>
+<p>「PONG」は便利ですが証明ではありません。green delivery も証明ではありません。実際に起きたことは execution record で示す必要があります。</p>
+<h3>今後</h3>
+<p>次は、各 scheduled session で fallback identity を見えるようにし、job 別の fallback rate を簡単な report にしたいです。また、unsupported primary model、oversized response、利用できない内容を返す fallback という失敗を意図的に試したいです。</p>
+<p>目標は fallback をなくすことではありません。degraded operation を明白にし、範囲を限定し、元へ戻せるようにすることです。</p>
+<h3>参考</h3>
+<h4>プロジェクトの記録</h4>
+<ul><li>self-hosted の定期 AI ジョブと session database から整理した匿名化済みのメモ。</li></ul>
+<h4>一般資料</h4>
+<ul><li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400">MDN Web Docs: 400 Bad Request</a></li><li><a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a></li></ul>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body>
+</html>

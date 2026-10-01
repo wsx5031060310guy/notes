@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>My AI Agent Quietly Ran on a Smaller Model for Four Weeks</title></head>
+<body>
+<h1>My AI Agent Quietly Ran on a Smaller Model for Four Weeks</h1>
+<figure><img src="https://image.pollinations.ai/prompt/a%20clean%20flat%20isometric%20technical%20illustration%20of%20an%20AI%20agent%20fallback%20chain%20with%20scheduled%20jobs%2C%20a%20primary%20model%2C%20a%20smaller%20backup%20model%2C%20monitoring%20gauges%2C%20and%20a%20message%20delivery%20pipeline%2C%20no%20text%2C%20no%20logos%2C%20no%20real%20people%2C%20no%20company%20or%20product%20names?width=1200&amp;height=630&amp;seed=20261001&amp;nologo=true" alt="AI-generated illustration"><figcaption>AI-generated illustration</figcaption></figure>
+<p>In this blog, I will describe how a healthy-looking fallback chain hid a serious decline in my scheduled AI jobs.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>How the failure stayed invisible</li>
+<li>Demo of the investigation</li>
+<li>Benefits and drawbacks</li>
+<li>The fix</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>I run a self-hosted AI agent framework. It handles about twenty scheduled jobs. These jobs prepare reports, audits, and summaries, then deliver the results to Telegram.</p>
+<p>The system had a primary language model and a fallback chain. That design looked sensible. If the main model became unavailable, a smaller model could keep the jobs running. The scheduler would not stop. Reports would still arrive.</p>
+<p>That is exactly what happened, but not in the way I wanted. The provider retired the primary model. Every call to it returned HTTP 400 with the message “model not supported.” The framework caught the error and silently moved every request to a small flash-lite class model.</p>
+<p>The jobs stayed green. Messages kept arriving. No alert fired. From the outside, the automation looked healthy.</p>
+<h3>Overview</h3>
+<p>A fallback chain changes the meaning of success. Without a fallback, an unavailable model produces a visible failure. With a fallback, the same outage can produce a valid response from a different model. The transport layer succeeds, but the quality characteristics may change.</p>
+<p>This distinction matters for scheduled work. A person using an interactive chat may notice that an answer feels weaker. A cron job has no such judgment. It sees a completed request, saves the response, and continues.</p>
+<p>My monitoring watched whether jobs completed and whether Telegram received messages. It did not watch which model actually answered. It also did not treat repeated fallback use as an incident. The system therefore measured delivery while ignoring execution identity.</p>
+<figure><img src="https://mermaid.ink/img/Zmxvd2NoYXJ0IFRECiAgICBBW1NjaGVkdWxlZCBqb2Igc3RhcnRzXSAtLT4gQltDYWxsIHByaW1hcnkgbW9kZWxdCiAgICBCIC0tPiBDe1ByaW1hcnkgYW5zd2Vycz99CiAgICBDIC0tIE5vOiBIVFRQIDQwMCAtLT4gRFtGYWxsYmFjayBtb2RlbCBhbnN3ZXJzXQogICAgQyAtLSBZZXMgLS0-IEVbUmVjb3JkIGFjdHVhbCBtb2RlbF0KICAgIEQgLS0-IEUKICAgIEUgLS0-IEZbRGVsaXZlciByZXN1bHRdCiAgICBFIC0tPiBHe0ZhbGxiYWNrIHJhdGUgaGlnaD99CiAgICBHIC0tIFllcyAtLT4gSFtBbGVydCBvcGVyYXRvcl0KICAgIEYgLS0-IEl7T3V0cHV0IG92ZXIgY2FwP30KICAgIEkgLS0gWWVzIC0tPiBKW1NhdmUgcmVzdCB0byBmaWxlXQogICAgSSAtLSBObyAtLT4gS1tTZW5kIG1lc3NhZ2VdCg==?type=png" alt="Proposed flowchart for model fallback monitoring and safe message delivery"><figcaption>Proposed design: record the model that actually answered, alert when fallback use stays high, and cap delivered output. So far only the model switch and the output cap are in place.</figcaption></figure>
+<h3>How the Failure Stayed Invisible</h3>
+<h4>Green status was too narrow</h4>
+<p>The scheduler considered a job successful when the request eventually returned and the delivery step completed. A response from the fallback model met that definition. The dashboard was technically correct, but the definition was incomplete.</p>
+<p>A basic health check also returned “PONG.” That proved that some model could answer a tiny prompt. It did not prove that the primary model was available. It did not prove that the scheduled job used the intended capability. The check tested reachability, not the whole contract.</p>
+<h4>Quality decay arrived later</h4>
+<p>The first clear symptoms appeared weeks later. One daily web-performance job entered a loop. It produced a transcript of fake tool calls that was about 360,000 characters long. The chat adapter split the transcript into roughly two hundred Telegram messages and eventually hit Telegram flood control.</p>
+<p>Another symptom appeared in an investment journal. It reported a Bitcoin price about eleven percent away from the real price. Each event looked like a separate content problem. Together, they suggested that the execution environment had changed.</p>
+<p>The dangerous part was the delay. The model outage started first. Obvious quality failures appeared later. A system that only alerts on visible job failures gives silent degradation time to spread across many tasks.</p>
+<h3>Demo of the Investigation</h3>
+<p>I stopped looking only at the scheduler status. I queried the framework’s session database instead. The model column showed which model had actually served each scheduled session.</p>
+<p>The result made the pattern clear. Every scheduled session since early September showed the fallback model. The primary model name was not appearing as the serving model because its calls had failed before generation.</p>
+<p>This query answered a better question: not “Did the job return something?” but “Which model produced the thing I delivered?” That is the evidence I had been missing.</p>
+<p>For similar systems, I would inspect a small set of fields together:</p>
+<ul>
+<li>The requested model.</li>
+<li>The model that actually answered.</li>
+<li>The reason for fallback.</li>
+<li>The job or session identifier.</li>
+<li>The final delivery size and delivery result.</li>
+</ul>
+<p>These fields separate provider failure, fallback behavior, content quality, and delivery pressure. A single green status cannot express all of them.</p>
+<h3>Benefits and Drawbacks</h3>
+<h4>Benefits</h4>
+<p>The fallback chain did preserve availability. Reports and summaries did not all disappear when the primary model was retired. For temporary rate limits or short provider outages, that behavior can be useful. It gives the system a controlled way to continue.</p>
+<p>Fallback also buys investigation time. An operator can repair the primary route without every downstream task failing at once. This is valuable when the output is low risk and the degraded model is still suitable for the task.</p>
+<h4>Drawbacks</h4>
+<p>Fallback can convert a loud outage into silent quality decay. The scheduler sees success. The chat adapter sees text. The recipient sees a message. None of those observations confirm that the intended model handled the work.</p>
+<p>A smaller model may also fail differently. It can loop, produce less reliable facts, or imitate tool calls instead of using tools correctly. The fallback mechanism itself is not the problem. The problem is allowing degraded operation without a label, a budget, or an alert.</p>
+<h3>The Fix</h3>
+<p>I first switched the primary model so scheduled jobs could use a supported model again. That removed the immediate source of the HTTP 400 responses.</p>
+<p>I also added a hard cap to the chunking chat adapter. It will deliver no more than 12,000 characters as chat messages. If the output is longer, the remaining content is saved to a file and linked. This does not fix a looping model, but it prevents one bad response from becoming hundreds of messages.</p>
+<p>The larger lesson is to alert on fallback rate. A single fallback may be normal. A sustained rate across scheduled sessions means the primary path is unhealthy, even if every job eventually returns text.</p>
+<p>I would now define the operating contract this way:</p>
+<ol>
+<li>Record the requested and actual model for every session.</li>
+<li>Count fallback events by job and by reason.</li>
+<li>Alert when fallback use becomes sustained or widespread.</li>
+<li>Label degraded output when the recipient should know.</li>
+<li>Cap delivery volume independently from model output.</li>
+<li>Test the primary route directly instead of accepting any “PONG.”</li>
+</ol>
+<p>These controls cover different failure boundaries. Model telemetry detects the routing problem. Output caps protect the delivery channel. Direct health checks verify the intended dependency.</p>
+<h3>Conclusion</h3>
+<p>My automation did not fail closed. It failed quietly and kept producing plausible output. That was more dangerous than a red job because it encouraged me to trust the system.</p>
+<p>A fallback chain is not only an availability feature. It is a degraded operating mode. I need to observe it as such. The most important signal is not whether a response exists. It is whether the intended model answered, how often the system fell back, and whether the delivered output stayed within safe limits.</p>
+<p>A “PONG” is useful, but it is not proof. Green delivery is useful, but it is not proof. The execution record must show what actually happened.</p>
+<h3>Other</h3>
+<p>Next, I want to make fallback identity visible in each scheduled session and build a simple report of fallback rate by job. I also want to test failure cases deliberately: an unsupported primary model, an oversized response, and a fallback that produces unusable content.</p>
+<p>The goal is not to remove fallback. The goal is to make degraded operation obvious, bounded, and reversible.</p>
+<h3>Reference</h3>
+<h4>Project evidence</h4>
+<ul><li>Sanitized notes from my self-hosted scheduled AI jobs and session database.</li></ul>
+<h4>General background</h4>
+<ul>
+<li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400">MDN Web Docs: 400 Bad Request</a></li>
+<li><a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a></li>
+</ul>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
