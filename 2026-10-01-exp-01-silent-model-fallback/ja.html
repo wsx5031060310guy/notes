@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><title>私の AI エージェントは4週間、小さなモデルでひっそり動いていました</title></head>
 <body>
 <h1>私の AI エージェントは4週間、小さなモデルでひっそり動いていました</h1>
-<figure><img src="https://image.pollinations.ai/prompt/a%20clean%20flat%20isometric%20technical%20illustration%20of%20an%20AI%20agent%20fallback%20chain%20with%20scheduled%20jobs%2C%20a%20primary%20model%2C%20a%20smaller%20backup%20model%2C%20monitoring%20gauges%2C%20and%20a%20message%20delivery%20pipeline%2C%20no%20text%2C%20no%20logos%2C%20no%20real%20people%2C%20no%20company%20or%20product%20names?width=1200&amp;height=630&amp;seed=20261001&amp;nologo=true" alt="AI生成のイラスト"><figcaption>AI生成のイラスト</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-cover.png" alt="私の AI エージェントは4週間、小さなモデルでひっそり動いていました"></figure>
 <p>この記事では、正常に見える fallback chain が定期実行する AI ジョブの深刻な品質低下を隠していた経験を紹介します。</p>
 <p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
 <h3>目次</h3>
@@ -15,11 +15,12 @@
 <p>システムには主要な language model と fallback chain がありました。この設計は合理的に見えました。主要モデルが利用できないとき、小さなモデルへ切り替えれば、scheduler は止まらず、レポートも届き続けます。</p>
 <p>実際に切り替えは動きました。しかし、望んだ形ではありませんでした。provider が主要モデルを廃止したため、すべての呼び出しが HTTP 400 の「model not supported」を返しました。framework はそのエラーを処理し、全リクエストを小さな flash-lite class のモデルへ黙って切り替えました。</p>
 <p>ジョブの状態は green のままでした。メッセージも届きました。alert は一度も発生しませんでした。外から見ると、自動化は正常でした。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-1.png" alt="何が起きたか：主モデル廃止から静かな品質劣化まで"><figcaption>何が起きたか：主モデルの廃止が、目に見える障害ではなく静かな品質劣化になりました。</figcaption></figure>
 <h3>概要</h3>
 <p>fallback chain を入れると、「成功」の意味が変わります。fallback がなければ、モデルを利用できない状態は明確な失敗になります。fallback があれば、同じ障害でも別のモデルから有効な形式の応答を得られます。通信は成功しますが、品質の特性は変化しているかもしれません。</p>
 <p>定期ジョブでは、この違いが重要です。対話型 chat の利用者なら、回答が弱くなったと感じる可能性があります。しかし cron job は品質を判断しません。完了した応答を受け取り、保存し、次の処理へ進むだけです。</p>
 <p>私の監視は、ジョブが完了したか、Telegram にメッセージが届いたかを見ていました。実際にどのモデルが回答したかは見ていませんでした。fallback の繰り返しも incident として扱っていませんでした。つまり、配信は計測していましたが、実行主体を無視していました。</p>
-<figure><img src="https://mermaid.ink/img/Zmxvd2NoYXJ0IFRECiAgICBBW-Wumuacn-OCuOODp-ODlumWi-Wni10gLS0-IEJb5Li76KaB44Oi44OH44Or44KS5ZG844G2XQogICAgQiAtLT4gQ3vkuLvopoHjg6Ljg4fjg6vjgYzlv5znrZQ_fQogICAgQyAtLSDjgYTjgYTjgYg6IEhUVFAgNDAwIC0tPiBEW-S7o-abv-ODouODh-ODq-OBjOW_nOetlF0KICAgIEMgLS0g44Gv44GEIC0tPiBFW-Wun-mam-OBruODouODh-ODq-OCkuiomOmMsl0KICAgIEQgLS0-IEUKICAgIEUgLS0-IEZb57WQ5p6c44KS6YWN5L-hXQogICAgRSAtLT4gR3vku6Pmm7_njofjgYzpq5jjgYQ_fQogICAgRyAtLSDjga_jgYQgLS0-IEhb6YGL55So6ICF44G46YCa55-lXQogICAgRiAtLT4gSXvlh7rlipvkuIrpmZDjgpLotoXpgY4_fQogICAgSSAtLSDjga_jgYQgLS0-IEpb5q6L44KK44KS44OV44Kh44Kk44Or5L-d5a2YXQogICAgSSAtLSDjgYTjgYTjgYggLS0-IEtb44Oh44OD44K744O844K46YCB5L-hXQo=?type=png" alt="改善案：モデルの切り替え監視と安全なメッセージ配信の流れ"><figcaption>改善案：実際に回答したモデルを記録し、fallback の利用が続いたら通知し、配信量を制限する流れです。現時点で導入済みなのは、モデルの切り替えと配信量の上限だけです。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-2.png" alt="改善案：モデルの切り替え監視と安全なメッセージ配信の流れ"><figcaption>改善案：実際に回答したモデルを記録し、fallback の利用が続いたら通知し、配信量を制限する流れです。現時点で導入済みなのは、モデルの切り替えと配信量の上限だけです。</figcaption></figure>
 <h3>障害が見えなかった理由</h3>
 <h4>Green status の定義が狭すぎました</h4>
 <p>scheduler は、最終的にリクエストが返り、配信が完了すれば成功と判断していました。fallback model の応答でも、この条件を満たします。dashboard の表示は技術的には正しかったのですが、成功の定義が不十分でした。</p>

@@ -3,7 +3,7 @@
 <head><meta charset="utf-8"><title>我的 AI Agent 默默改用小模型跑了四週</title></head>
 <body>
 <h1>我的 AI Agent 默默改用小模型跑了四週</h1>
-<figure><img src="https://image.pollinations.ai/prompt/a%20clean%20flat%20isometric%20technical%20illustration%20of%20an%20AI%20agent%20fallback%20chain%20with%20scheduled%20jobs%2C%20a%20primary%20model%2C%20a%20smaller%20backup%20model%2C%20monitoring%20gauges%2C%20and%20a%20message%20delivery%20pipeline%2C%20no%20text%2C%20no%20logos%2C%20no%20real%20people%2C%20no%20company%20or%20product%20names?width=1200&amp;height=630&amp;seed=20261001&amp;nologo=true" alt="AI 生成插圖"><figcaption>AI 生成插圖</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-cover.png" alt="我的 AI Agent 默默改用小模型跑了四週"></figure>
 <p>這篇文章要分享一個真實經驗：看似正常的 fallback chain，如何掩蓋排程 AI 工作的嚴重品質衰退。</p>
 <p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
 <h3>目錄</h3>
@@ -15,11 +15,12 @@
 <p>系統有一個主要 language model，也設計了 fallback chain。這個做法原本很合理。主要模型不能用時，可以改由較小的模型接手。scheduler 不會停止，報告也能繼續送達。</p>
 <p>切換機制確實啟動了，卻不是我希望的情況。provider 停用了主要模型，所有呼叫都回傳 HTTP 400，訊息是「model not supported」。framework 接住錯誤後，默默把每個 request 都切到較小的 flash-lite class 模型。</p>
 <p>工作狀態一直是綠色。訊息持續送達。沒有任何 alert。從外部看來，整套自動化仍然健康。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-1.png" alt="發生了什麼：從主模型下架到品質悄悄變差"><figcaption>發生了什麼：主模型下架沒有變成看得見的故障，而是變成無聲的品質劣化。</figcaption></figure>
 <h3>概觀</h3>
 <p>加入 fallback chain 之後，「成功」的意義會改變。沒有 fallback 時，模型不可用會產生明確的失敗。有 fallback 時，同一個 outage 可能由另一個模型回傳格式有效的 response。傳輸層成功了，但品質特性可能已經改變。</p>
 <p>這個差異對排程工作特別重要。使用互動式 chat 的人，或許會感覺回答變弱了。cron job 不會做這種判斷。它只會看到 request 完成，儲存回應，然後繼續執行。</p>
 <p>我的監控只看工作是否完成，以及 Telegram 是否收到訊息。它沒有追蹤實際是哪一個模型回答，也沒有把反覆使用 fallback 視為 incident。因此，系統量到了「有沒有送達」，卻忽略了「由誰執行」。</p>
-<figure><img src="https://mermaid.ink/img/Zmxvd2NoYXJ0IFRECiAgICBBW-aOkueoi-W3peS9nOmWi-Wni10gLS0-IEJb5ZG85Y-r5Li76KaB5qih5Z6LXQogICAgQiAtLT4gQ3vkuLvopoHmqKHlnovmnInlm57mh4k_fQogICAgQyAtLSDlkKY6IEhUVFAgNDAwIC0tPiBEW-WCmeaPtOaooeWei-WbnuaHiV0KICAgIEMgLS0g5pivIC0tPiBFW-iomOmMhOWvpumam-aooeWei10KICAgIEQgLS0-IEUKICAgIEUgLS0-IEZb5YKz6YCB57WQ5p6cXQogICAgRSAtLT4gR3vlgpnmj7TnjofpgY7pq5g_fQogICAgRyAtLSDmmK8gLS0-IEhb6YCa55-l57at6YGL6ICFXQogICAgRiAtLT4gSXvovLjlh7rotoXpgY7kuIrpmZA_fQogICAgSSAtLSDmmK8gLS0-IEpb5YW26aSY5a2Y5oiQ5qqU5qGIXQogICAgSSAtLSDlkKYgLS0-IEtb5YKz6YCB6KiK5oGvXQo=?type=png" alt="建議設計：模型備援監控與安全訊息傳送流程"><figcaption>建議的設計：記錄實際回答的模型、備援率過高時通知，並限制聊天訊息的傳送量。目前已完成的只有更換主模型與傳送量上限。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-2.png" alt="建議設計：模型備援監控與安全訊息傳送流程"><figcaption>建議的設計：記錄實際回答的模型、備援率過高時通知，並限制聊天訊息的傳送量。目前已完成的只有更換主模型與傳送量上限。</figcaption></figure>
 <h3>為什麼故障一直沒被發現</h3>
 <h4>綠色狀態的定義太窄</h4>
 <p>scheduler 認定成功的條件是：request 最後有回應，而且 delivery step 完成。fallback model 的回答也符合這個定義。dashboard 在技術上沒有顯示錯誤，但它使用的成功定義並不完整。</p>
