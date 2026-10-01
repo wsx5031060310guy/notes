@@ -15,17 +15,19 @@
 <p>系統有一個主要 language model，也設計了 fallback chain。這個做法原本很合理。主要模型不能用時，可以改由較小的模型接手。scheduler 不會停止，報告也能繼續送達。</p>
 <p>切換機制確實啟動了，卻不是我希望的情況。provider 停用了主要模型，所有呼叫都回傳 HTTP 400，訊息是「model not supported」。framework 接住錯誤後，默默把每個 request 都切到較小的 flash-lite class 模型。</p>
 <p>工作狀態一直是綠色。訊息持續送達。沒有任何 alert。從外部看來，整套自動化仍然健康。</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-1.png" alt="發生了什麼：從主模型下架到品質悄悄變差"><figcaption>發生了什麼：主模型下架沒有變成看得見的故障，而是變成無聲的品質劣化。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-1.png" alt="發生了什麼：從主模型下架到品質悄悄變差"></figure>
+<p><em>發生了什麼：主模型下架沒有變成看得見的故障，而是變成無聲的品質劣化。</em></p>
 <h3>概觀</h3>
 <p>加入 fallback chain 之後，「成功」的意義會改變。沒有 fallback 時，模型不可用會產生明確的失敗。有 fallback 時，同一個 outage 可能由另一個模型回傳格式有效的 response。傳輸層成功了，但品質特性可能已經改變。</p>
 <p>這個差異對排程工作特別重要。使用互動式 chat 的人，或許會感覺回答變弱了。cron job 不會做這種判斷。它只會看到 request 完成，儲存回應，然後繼續執行。</p>
 <p>我的監控只看工作是否完成，以及 Telegram 是否收到訊息。它沒有追蹤實際是哪一個模型回答，也沒有把反覆使用 fallback 視為 incident。因此，系統量到了「有沒有送達」，卻忽略了「由誰執行」。</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-2.png" alt="建議設計：模型備援監控與安全訊息傳送流程"><figcaption>建議的設計：記錄實際回答的模型、備援率過高時通知，並限制聊天訊息的傳送量。目前已完成的只有更換主模型與傳送量上限。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/zh-diagram-2.png" alt="建議設計：模型備援監控與安全訊息傳送流程"></figure>
+<p><em>建議的設計：記錄實際回答的模型、備援率過高時通知，並限制聊天訊息的傳送量。目前已完成的只有更換主模型與傳送量上限。</em></p>
 <h3>為什麼故障一直沒被發現</h3>
-<h4>綠色狀態的定義太窄</h4>
+<p><strong>綠色狀態的定義太窄</strong></p>
 <p>scheduler 認定成功的條件是：request 最後有回應，而且 delivery step 完成。fallback model 的回答也符合這個定義。dashboard 在技術上沒有顯示錯誤，但它使用的成功定義並不完整。</p>
 <p>基本的 health check 也回傳「PONG」。這只能證明某一個模型可以回答很短的 prompt，無法證明主要模型可用，也無法證明排程工作使用了預期的能力。檢查測的是連通性，不是完整的運行契約。</p>
-<h4>品質衰退較晚才浮現</h4>
+<p><strong>品質衰退較晚才浮現</strong></p>
 <p>明顯症狀在幾週後才出現。一個每日 web performance job 卡進 loop，產生約三十六萬字元、充滿假 tool call 的 transcript。chat adapter 把內容切成大約兩百則 Telegram 訊息，最後撞上 Telegram flood control。</p>
 <p>另一個症狀出現在 investment journal。它回報的 Bitcoin 價格與真實價格相差約百分之十一。單獨看時，這兩件事像是不同的 content problem。放在一起看，才會懷疑執行環境已經改變。</p>
 <p>最危險的是時間差。模型停止服務在前，明顯的品質問題在後。如果系統只對可見的 job failure 發出警告，silent degradation 就有時間擴散到許多工作。</p>
@@ -39,10 +41,10 @@
 </ul>
 <p>這些欄位可以把 provider failure、fallback behavior、content quality 與 delivery pressure 分開。一個綠色狀態無法表達所有事情。</p>
 <h3>優點與缺點</h3>
-<h4>優點</h4>
+<p><strong>優點</strong></p>
 <p>fallback chain 的確保住了 availability。主要模型被停用時，報告與摘要沒有全部消失。遇到暫時的 rate limit 或短暫 provider outage，這個行為很有用，因為系統能以受控方式繼續運行。</p>
 <p>fallback 也能爭取調查時間。維運者可以修復主要路徑，而不必讓所有 downstream task 同時失敗。當輸出風險低，而且較小模型仍足以處理該工作時，這種方式有實際價值。</p>
-<h4>缺點</h4>
+<p><strong>缺點</strong></p>
 <p>fallback 可能把大聲的 outage 變成安靜的 quality decay。scheduler 看到成功，chat adapter 看到文字，收件者看到訊息，但這些現象都無法證明工作是由預期模型完成。</p>
 <p>較小的模型也可能用不同方式失敗。它可能陷入 loop、提供較不可靠的事實，或不是真的使用工具，而是在文字中模仿 tool call。問題不在 fallback 本身，而在 degraded operation 沒有標示、限制或通知。</p>
 <h3>修正方式</h3>
@@ -62,9 +64,9 @@
 <p>接下來，我想在每個 scheduled session 中顯示 fallback identity，並製作一份依工作分類的 fallback rate 簡單報告。我也想刻意測試幾種失敗：unsupported primary model、oversized response，以及產生無法使用內容的 fallback。</p>
 <p>目標不是移除 fallback，而是讓 degraded operation 明顯、受限，而且可以還原。</p>
 <h3>參考</h3>
-<h4>專案證據</h4>
+<p><strong>專案證據</strong></p>
 <ul><li>由 self-hosted 排程 AI 工作與 session database 整理的匿名專案筆記。</li></ul>
-<h4>一般背景</h4>
+<p><strong>一般背景</strong></p>
 <ul><li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400">MDN Web Docs: 400 Bad Request</a></li><li><a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a></li></ul>
 <p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
 <p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>

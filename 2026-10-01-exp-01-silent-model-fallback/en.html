@@ -23,17 +23,19 @@
 <p>The system had a primary language model and a fallback chain. That design looked sensible. If the main model became unavailable, a smaller model could keep the jobs running. The scheduler would not stop. Reports would still arrive.</p>
 <p>That is exactly what happened, but not in the way I wanted. The provider retired the primary model. Every call to it returned HTTP 400 with the message “model not supported.” The framework caught the error and silently moved every request to a small flash-lite class model.</p>
 <p>The jobs stayed green. Messages kept arriving. No alert fired. From the outside, the automation looked healthy.</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/en-diagram-1.png" alt="What happened: the retired model, a silent fallback, and green jobs while quality decayed"><figcaption>What happened: the retired model turned an outage into silent quality decay.</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/en-diagram-1.png" alt="What happened: the retired model, a silent fallback, and green jobs while quality decayed"></figure>
+<p><em>What happened: the retired model turned an outage into silent quality decay.</em></p>
 <h3>Overview</h3>
 <p>A fallback chain changes the meaning of success. Without a fallback, an unavailable model produces a visible failure. With a fallback, the same outage can produce a valid response from a different model. The transport layer succeeds, but the quality characteristics may change.</p>
 <p>This distinction matters for scheduled work. A person using an interactive chat may notice that an answer feels weaker. A cron job has no such judgment. It sees a completed request, saves the response, and continues.</p>
 <p>My monitoring watched whether jobs completed and whether Telegram received messages. It did not watch which model actually answered. It also did not treat repeated fallback use as an incident. The system therefore measured delivery while ignoring execution identity.</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/en-diagram-2.png" alt="Proposed flowchart for model fallback monitoring and safe message delivery"><figcaption>Proposed design: record the model that actually answered, alert when fallback use stays high, and cap delivered output. So far only the model switch and the output cap are in place.</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/en-diagram-2.png" alt="Proposed flowchart for model fallback monitoring and safe message delivery"></figure>
+<p><em>Proposed design: record the model that actually answered, alert when fallback use stays high, and cap delivered output. So far only the model switch and the output cap are in place.</em></p>
 <h3>How the Failure Stayed Invisible</h3>
-<h4>Green status was too narrow</h4>
+<p><strong>Green status was too narrow</strong></p>
 <p>The scheduler considered a job successful when the request eventually returned and the delivery step completed. A response from the fallback model met that definition. The dashboard was technically correct, but the definition was incomplete.</p>
 <p>A basic health check also returned “PONG.” That proved that some model could answer a tiny prompt. It did not prove that the primary model was available. It did not prove that the scheduled job used the intended capability. The check tested reachability, not the whole contract.</p>
-<h4>Quality decay arrived later</h4>
+<p><strong>Quality decay arrived later</strong></p>
 <p>The first clear symptoms appeared weeks later. One daily web-performance job entered a loop. It produced a transcript of fake tool calls that was about 360,000 characters long. The chat adapter split the transcript into roughly two hundred Telegram messages and eventually hit Telegram flood control.</p>
 <p>Another symptom appeared in an investment journal. It reported a Bitcoin price about eleven percent away from the real price. Each event looked like a separate content problem. Together, they suggested that the execution environment had changed.</p>
 <p>The dangerous part was the delay. The model outage started first. Obvious quality failures appeared later. A system that only alerts on visible job failures gives silent degradation time to spread across many tasks.</p>
@@ -51,10 +53,10 @@
 </ul>
 <p>These fields separate provider failure, fallback behavior, content quality, and delivery pressure. A single green status cannot express all of them.</p>
 <h3>Benefits and Drawbacks</h3>
-<h4>Benefits</h4>
+<p><strong>Benefits</strong></p>
 <p>The fallback chain did preserve availability. Reports and summaries did not all disappear when the primary model was retired. For temporary rate limits or short provider outages, that behavior can be useful. It gives the system a controlled way to continue.</p>
 <p>Fallback also buys investigation time. An operator can repair the primary route without every downstream task failing at once. This is valuable when the output is low risk and the degraded model is still suitable for the task.</p>
-<h4>Drawbacks</h4>
+<p><strong>Drawbacks</strong></p>
 <p>Fallback can convert a loud outage into silent quality decay. The scheduler sees success. The chat adapter sees text. The recipient sees a message. None of those observations confirm that the intended model handled the work.</p>
 <p>A smaller model may also fail differently. It can loop, produce less reliable facts, or imitate tool calls instead of using tools correctly. The fallback mechanism itself is not the problem. The problem is allowing degraded operation without a label, a budget, or an alert.</p>
 <h3>The Fix</h3>
@@ -79,9 +81,9 @@
 <p>Next, I want to make fallback identity visible in each scheduled session and build a simple report of fallback rate by job. I also want to test failure cases deliberately: an unsupported primary model, an oversized response, and a fallback that produces unusable content.</p>
 <p>The goal is not to remove fallback. The goal is to make degraded operation obvious, bounded, and reversible.</p>
 <h3>Reference</h3>
-<h4>Project evidence</h4>
+<p><strong>Project evidence</strong></p>
 <ul><li>Sanitized notes from my self-hosted scheduled AI jobs and session database.</li></ul>
-<h4>General background</h4>
+<p><strong>General background</strong></p>
 <ul>
 <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400">MDN Web Docs: 400 Bad Request</a></li>
 <li><a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a></li>

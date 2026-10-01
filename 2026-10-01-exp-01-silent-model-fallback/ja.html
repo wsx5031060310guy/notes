@@ -15,17 +15,19 @@
 <p>システムには主要な language model と fallback chain がありました。この設計は合理的に見えました。主要モデルが利用できないとき、小さなモデルへ切り替えれば、scheduler は止まらず、レポートも届き続けます。</p>
 <p>実際に切り替えは動きました。しかし、望んだ形ではありませんでした。provider が主要モデルを廃止したため、すべての呼び出しが HTTP 400 の「model not supported」を返しました。framework はそのエラーを処理し、全リクエストを小さな flash-lite class のモデルへ黙って切り替えました。</p>
 <p>ジョブの状態は green のままでした。メッセージも届きました。alert は一度も発生しませんでした。外から見ると、自動化は正常でした。</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-1.png" alt="何が起きたか：主モデル廃止から静かな品質劣化まで"><figcaption>何が起きたか：主モデルの廃止が、目に見える障害ではなく静かな品質劣化になりました。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-1.png" alt="何が起きたか：主モデル廃止から静かな品質劣化まで"></figure>
+<p><em>何が起きたか：主モデルの廃止が、目に見える障害ではなく静かな品質劣化になりました。</em></p>
 <h3>概要</h3>
 <p>fallback chain を入れると、「成功」の意味が変わります。fallback がなければ、モデルを利用できない状態は明確な失敗になります。fallback があれば、同じ障害でも別のモデルから有効な形式の応答を得られます。通信は成功しますが、品質の特性は変化しているかもしれません。</p>
 <p>定期ジョブでは、この違いが重要です。対話型 chat の利用者なら、回答が弱くなったと感じる可能性があります。しかし cron job は品質を判断しません。完了した応答を受け取り、保存し、次の処理へ進むだけです。</p>
 <p>私の監視は、ジョブが完了したか、Telegram にメッセージが届いたかを見ていました。実際にどのモデルが回答したかは見ていませんでした。fallback の繰り返しも incident として扱っていませんでした。つまり、配信は計測していましたが、実行主体を無視していました。</p>
-<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-2.png" alt="改善案：モデルの切り替え監視と安全なメッセージ配信の流れ"><figcaption>改善案：実際に回答したモデルを記録し、fallback の利用が続いたら通知し、配信量を制限する流れです。現時点で導入済みなのは、モデルの切り替えと配信量の上限だけです。</figcaption></figure>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-01-exp-01-silent-model-fallback/ja-diagram-2.png" alt="改善案：モデルの切り替え監視と安全なメッセージ配信の流れ"></figure>
+<p><em>改善案：実際に回答したモデルを記録し、fallback の利用が続いたら通知し、配信量を制限する流れです。現時点で導入済みなのは、モデルの切り替えと配信量の上限だけです。</em></p>
 <h3>障害が見えなかった理由</h3>
-<h4>Green status の定義が狭すぎました</h4>
+<p><strong>Green status の定義が狭すぎました</strong></p>
 <p>scheduler は、最終的にリクエストが返り、配信が完了すれば成功と判断していました。fallback model の応答でも、この条件を満たします。dashboard の表示は技術的には正しかったのですが、成功の定義が不十分でした。</p>
 <p>簡単な health check も「PONG」を返していました。これは、どれかのモデルが短い prompt に答えられることを示すだけです。主要モデルが利用可能であることも、定期ジョブが意図した能力を使っていることも証明しません。確認していたのは到達性であり、契約全体ではありませんでした。</p>
-<h4>品質低下は後から現れました</h4>
+<p><strong>品質低下は後から現れました</strong></p>
 <p>明確な症状が現れたのは数週間後です。日次の web performance job が loop に入り、偽の tool call を並べた約三十六万文字の transcript を生成しました。chat adapter はそれを約二百件の Telegram message に分割し、最後には Telegram の flood control に達しました。</p>
 <p>別の症状は investment journal に現れました。Bitcoin の価格を実際の価格から約十一パーセントずれた値で報告しました。それぞれを単独で見ると、別々の content problem に見えます。しかし一緒に考えると、実行環境そのものが変わった可能性が見えてきます。</p>
 <p>危険なのは時間差です。モデルの停止が先に始まり、目立つ品質問題が後から出ました。明白な job failure だけを通知する仕組みでは、silent degradation が多くのタスクへ広がる時間を与えてしまいます。</p>
@@ -39,10 +41,10 @@
 </ul>
 <p>これらを記録すれば、provider failure、fallback behavior、content quality、delivery pressure を分けて考えられます。一つの green status だけでは、すべてを表現できません。</p>
 <h3>利点と欠点</h3>
-<h4>利点</h4>
+<p><strong>利点</strong></p>
 <p>fallback chain は可用性を守りました。主要モデルが廃止されても、すべての report や summary が消えたわけではありません。一時的な rate limit や短い provider outage なら、この動作は役立ちます。システムを制御された形で継続できます。</p>
 <p>fallback は調査時間も作ります。すべての downstream task が同時に失敗する前に、operator が主要経路を修復できます。出力のリスクが低く、代替モデルでも用途を満たせる場合には有効です。</p>
-<h4>欠点</h4>
+<p><strong>欠点</strong></p>
 <p>fallback は大きな障害を silent quality decay に変えることがあります。scheduler には成功、chat adapter には text、受信者には message が見えます。しかし、どれも意図したモデルが処理した証明ではありません。</p>
 <p>小さなモデルは別の失敗をする可能性もあります。loop に入る、事実の信頼性が下がる、tool を正しく使う代わりに tool call を模倣する、といった問題です。fallback 自体が悪いのではありません。degraded operation に label、budget、alert がないことが問題です。</p>
 <h3>修正</h3>
@@ -62,9 +64,9 @@
 <p>次は、各 scheduled session で fallback identity を見えるようにし、job 別の fallback rate を簡単な report にしたいです。また、unsupported primary model、oversized response、利用できない内容を返す fallback という失敗を意図的に試したいです。</p>
 <p>目標は fallback をなくすことではありません。degraded operation を明白にし、範囲を限定し、元へ戻せるようにすることです。</p>
 <h3>参考</h3>
-<h4>プロジェクトの記録</h4>
+<p><strong>プロジェクトの記録</strong></p>
 <ul><li>self-hosted の定期 AI ジョブと session database から整理した匿名化済みのメモ。</li></ul>
-<h4>一般資料</h4>
+<p><strong>一般資料</strong></p>
 <ul><li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400">MDN Web Docs: 400 Bad Request</a></li><li><a href="https://core.telegram.org/bots/faq">Telegram Bots FAQ</a></li></ul>
 <p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
 <p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
