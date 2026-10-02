@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>RAG with Postgres and pgvector: Chunking, Embeddings, and Indexes</title></head>
+<body>
+<h1>RAG with Postgres and pgvector: Chunking, Embeddings, and Indexes</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-02-con-01-rag-pgvector/en-cover.png" alt="RAG with Postgres and pgvector: Chunking, Embeddings, and Indexes"></figure>
+<p>In this blog, I will explain how the main parts of a retrieval-augmented generation system fit together inside Postgres.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Chunking and embeddings</li>
+<li>Retrieval with pgvector</li>
+<li>HNSW, IVFFlat, and filtering</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>A language model can write fluent text, but it does not automatically know the current documents in my application. Retrieval-augmented generation, usually called RAG, adds a search step before generation. The application finds relevant passages and places them in the model prompt. The model can then answer with context that came from a controlled collection.</p>
+<p>RAG is not one feature. It is a pipeline. Documents must be divided into useful pieces. Each piece must receive an embedding. The vectors and their source text must be stored. At question time, the same embedding model converts the question into a vector. A similarity query selects candidate chunks. Finally, the application builds a prompt and asks the language model to answer from that context.</p>
+<p>Postgres with pgvector is a practical way to hold this pipeline together. pgvector adds vector data types, distance operators, exact search, and approximate indexes. The same database can also hold document IDs, access rules, timestamps, categories, and ordinary relational data. This matters because useful retrieval usually needs both semantic similarity and normal filters.</p>
+<h3>Overview</h3>
+<p>I think about RAG as two connected flows. The indexing flow prepares knowledge before a user asks anything. The query flow runs for each question.</p>
+<p>In the indexing flow, the application reads a source, normalizes it, splits it into chunks, calculates a content hash, creates embeddings for changed chunks, and stores everything in Postgres. In the query flow, it embeds the question, applies required metadata filters, searches nearby vectors, selects the best text, and sends that text to the model.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-02-con-01-rag-pgvector/en-diagram-1.png" alt="Indexing flow from source text to stored embeddings"></figure>
+<p><em>A content hash lets the indexing flow skip embeddings when the chunk has not changed.</em></p>
+<p>The database row should keep more than a vector. I want the original text, source identifier, chunk position, embedding model identifier, content hash, and metadata used for filtering. Without the source text, retrieval cannot build context. Without an identifier and position, it is hard to trace an answer back to its document or fetch neighboring chunks.</p>
+<h3>Chunking and embeddings</h3>
+<p>Chunking decides what one search result means. A whole manual may contain the answer, but one vector for the entire manual mixes many subjects. A chunk that is too small may match a phrase while losing the explanation around it. There is no universal size that solves this trade-off.</p>
+<p>A useful starting method is to split on the document structure. Headings, paragraphs, list items, and sections carry meaning. I prefer these boundaries to blind cuts in the middle of sentences. Some overlap can preserve context across boundaries, but overlap also creates duplicate results and more embeddings. The right choice depends on the documents and the questions people ask.</p>
+<p>Each chunk is passed to an embedding model. The result is a vector whose dimensions encode patterns learned by that model. Text with related meaning should be closer under the distance measure the system uses. The document chunks and user questions must use compatible embeddings. Mixing vectors from unrelated models in one search space makes distances meaningless.</p>
+<p>I also want a content hash for every normalized chunk. During a later import, I can compare the new hash with the stored hash. If the text and embedding model are unchanged, I can keep the current vector. If the content changed, I create a new embedding. This avoids paying for repeated work and reduces unnecessary writes.</p>
+<p>The hash is not a replacement for version metadata. Normalization rules can change, and embedding models can change. I would include those choices in the identity of the indexed representation. A model migration can then run deliberately instead of quietly mixing old and new vectors.</p>
+<h3>Retrieval with pgvector</h3>
+<p>pgvector supports exact nearest-neighbor search by default. Exact search compares the query against all eligible vectors and gives perfect recall for that search. This is simple and is often the best baseline. It tells me what correct retrieval looks like before I add approximation.</p>
+<p>The distance operator must match how the embeddings are intended to be compared. pgvector supports choices including L2 distance, inner product, and cosine distance. The index operator class must match the query operator. If the query orders by cosine distance but the index was built for another measure, the intended index will not serve that query correctly.</p>
+<p>A typical request has more constraints than similarity. A user may only be allowed to search one workspace. A result may need a language, category, status, or document type. These conditions belong in the query, not in a later cleanup step that risks exposing the wrong data.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-02-con-01-rag-pgvector/en-diagram-2.png" alt="Question retrieval flow through filters and vector search"></figure>
+<p><em>The query flow combines access and metadata filters with vector similarity before adding chunks to the prompt.</em></p>
+<p>After retrieval, the application still has work to do. It can remove near-duplicates, keep within a context budget, include source labels, and optionally rerank candidates. The final prompt should tell the model to use the supplied material and to admit when that material is insufficient. RAG improves access to evidence, but it does not guarantee that the generated answer will interpret the evidence correctly.</p>
+<h3>HNSW, IVFFlat, and filtering</h3>
+<p>When exact search is no longer fast enough, pgvector offers HNSW and IVFFlat indexes for approximate nearest-neighbor search. Approximation trades some recall for speed. That means adding an index can change which rows appear. I would measure retrieval quality, not only latency, before and after the change.</p>
+<p>HNSW builds a multilayer graph. The pgvector documentation describes it as having a better speed-recall trade-off than IVFFlat, with slower builds and higher memory use. It does not require a training step, so an HNSW index can be created before the table contains data.</p>
+<p>IVFFlat divides vectors into lists and searches selected lists near the query. It builds faster and uses less memory than HNSW, but usually has a weaker speed-recall trade-off. It should be created after the table contains representative data because its list structure requires training. Its list count and query probes affect the balance between speed and recall.</p>
+<p>Filtering changes index behavior. With an approximate vector index, Postgres may scan candidates and then apply a filter. If only a small share survives, the result can contain fewer useful rows than expected. pgvector documents iterative scans as one way to continue scanning when filters remove candidates.</p>
+<p>Partial indexes are useful when queries repeatedly target a small number of stable categories. For example, separate partial vector indexes can cover rows for a particular category. If there are many filter values, partitioning may be a better design. Ordinary B-tree indexes on filter columns can also make an exact vector search practical when the filter already narrows the set strongly.</p>
+<p>This is why I would not choose a vector index from a diagram alone. I would start with exact search, collect representative questions, define what relevant results look like, and compare recall and latency. Then I would test HNSW or IVFFlat using the real filters.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<p>Postgres keeps vectors beside the data that explains and controls them. I can use transactions, joins, backups, and familiar authorization patterns. A single query can combine semantic distance with structured conditions. For a product that already depends on Postgres, this can reduce the number of moving parts.</p>
+<p>pgvector also gives a clear growth path. I can begin with exact search. Later, I can add an approximate index when measurements show a need. HNSW and IVFFlat offer different operational trade-offs rather than forcing one design.</p>
+<p><strong>Drawbacks</strong></p>
+<p>RAG still needs an evaluation process. A fast query is not useful if chunking hides the answer or filters remove it. Embeddings consume storage and must be regenerated when content or the embedding model changes. Approximate indexes add tuning, build time, memory use, and possible recall loss.</p>
+<p>One database also does not remove application responsibility. The application must enforce access scope, track sources, manage prompt size, detect stale content, and show uncertainty. It must test both retrieval and the final answer. A generated sentence can be wrong even when the correct chunk was retrieved.</p>
+<h3>Conclusion</h3>
+<p>RAG with Postgres and pgvector is easiest to understand as a data pipeline, not as a magic database query. Good results begin with meaningful chunks and consistent embeddings. Content hashes prevent unnecessary re-embedding. Metadata and access filters keep retrieval relevant and safe. Exact search provides a baseline, while HNSW and IVFFlat offer different ways to trade recall for speed.</p>
+<p>The important design choice is not simply which index to create. It is how to preserve the connection between an answer, a chunk, and its source. When that connection stays visible, I can evaluate mistakes and improve the system.</p>
+<h3>Other</h3>
+<p>Next, I want to build a small evaluation set with real questions, expected source passages, and difficult negative examples. I also want to compare structure-aware chunking with fixed-size chunking, then measure retrieval quality before testing approximate indexes. A later experiment could compare partial indexes, partitioning, and ordinary metadata indexes under the same filtered queries.</p>
+<h3>Reference</h3>
+<p><strong>pgvector</strong></p>
+<p>pgvector — Open-source vector similarity search for Postgres: <a href="https://github.com/pgvector/pgvector">https://github.com/pgvector/pgvector</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
