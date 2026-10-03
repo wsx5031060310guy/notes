@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>A Token-Saving CLI Proxy Made My Failing Build Look Green</title></head>
+<body>
+<h1>A Token-Saving CLI Proxy Made My Failing Build Look Green</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/en-cover.png" alt="A Token-Saving CLI Proxy Made My Failing Build Look Green"></figure>
+<p>A useful optimization became a false source of truth when it summarized a failed compiler run as “No errors found.”</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>How the false green happened</li>
+<li>The fix</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>In this blog, I will describe a failure caused by a token-saving CLI proxy. The proxy sat between command-line programs and an AI coding agent. Its job was simple: rewrite and compress long output before the agent read it.</p>
+<p>This idea is attractive. Build logs can be repetitive. Test runners can print thousands of lines. An AI agent does not always need every progress message or repeated warning. Shorter output can reduce the context used by the agent and make the important lines easier to find.</p>
+<p>But compressed output is not the command itself. It is a second program’s interpretation of that command. In my case, this distinction turned a compiler failure into a successful-looking summary.</p>
+<p>The project did not have <strong>node_modules</strong> installed. Running the TypeScript compiler should therefore fail. When the compiler ran through the proxy, the agent received the sentence “No errors found.” The agent trusted that sentence and reported that the build passed.</p>
+<p>No compiler bug was involved. The failure was in the observation path. The real command and the agent’s view of the command had separated.</p>
+<h3>Overview</h3>
+<p>The original flow had three parts. First, the AI coding agent selected a command. Second, the proxy executed or observed that command and compressed its output. Third, the agent made a decision from the compressed text.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/en-diagram-1.png" alt="The proxy changed a compiler failure into a successful-looking summary"></figure>
+<p><em>The failed path: a real compiler error became a false green summary before the agent evaluated it.</em></p>
+<p>The weak point was not compression by itself. The weak point was treating generated prose as the final result for a command with a machine-readable success signal.</p>
+<p>Shell commands already have a compact contract: the process exit code. A successful process normally returns zero. A failed process returns a non-zero value. Logs explain what happened, but the exit code tells the caller whether the process completed successfully.</p>
+<p>The proxy replaced that contract with a sentence. The sentence looked clear, but it was wrong. Because the agent saw only the rewritten output, it had no independent evidence that the underlying process had failed.</p>
+<h3>How the False Green Happened</h3>
+<p><strong>The optimization changed the evidence</strong></p>
+<p>A normal output filter removes noise while preserving meaning. A summarizer goes further. It decides which lines matter, groups messages, and may produce a conclusion. That conclusion becomes new data. It can contain an error even when the original command behaved correctly.</p>
+<p>This creates two separate questions. What did the tool return? What did the summary say? If the system records only the second answer, debugging becomes difficult because the primary evidence is gone.</p>
+<p>In this case, the missing dependencies were enough to make the TypeScript compiler fail. The summary still said there were no errors. The AI agent then did what its input encouraged it to do: it treated the check as green.</p>
+<p><strong>Why the result was convincing</strong></p>
+<p>“No errors found” is short and confident. It resembles the result a developer expects after a clean type-check. It does not look like a warning, an uncertain guess, or an incomplete log. That makes it more dangerous than an obviously broken output stream.</p>
+<p>The agent also had no reason to infer that dependencies were missing if that fact was removed from its view. Reasoning cannot recover evidence that an intermediary discarded or rewrote incorrectly.</p>
+<p><strong>The same risk affected file writes</strong></p>
+<p>The problem was not limited to builds. The proxy also altered <strong>grep</strong> output that was later written into an environment file. That changed the artifact itself, not merely the way a human or agent viewed a log.</p>
+<p>This is an important boundary. Output intended for reading may sometimes be summarized. Output intended to become another program’s input must remain exact. Once transformed text is redirected into a file, small editorial changes can become configuration errors.</p>
+<h3>The Fix</h3>
+<p>I changed the execution rule for build, type-check, and test commands. These commands bypass the proxy. Their process exit codes are checked directly.</p>
+<p>The same rule applies to output that will be written to a file. That output also bypasses the proxy, because it is data rather than commentary. The proxy is allowed to help with human-facing logs, but it does not sit inside a machine-to-machine data path.</p>
+<p>The corrected design separates status from explanation. The exit code is authoritative. Raw output remains available when exact details matter. A compact summary can still be useful for navigation, but it cannot turn a non-zero exit into success.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/en-diagram-2.png" alt="Critical commands bypass the proxy and use the real exit code"></figure>
+<p><em>The implemented fix: critical checks and file-bound output bypass the proxy, while the real exit code controls pass or fail.</em></p>
+<p>This rule is deliberately simple. It does not ask a summarizer to classify every possible error correctly. It uses the interface that command-line tools already provide.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>Build, type-check, and test results now follow the real process status.</li>
+<li>Data written to files is not silently rewritten.</li>
+<li>The AI agent can still receive shorter logs for lower-risk, human-facing commands.</li>
+<li>The trust boundary is easier to explain: prose helps interpretation, but it does not define success.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>Critical commands may use more context because their output is not compressed by the proxy.</li>
+<li>Raw logs can contain repetitive details that are harder for an agent to scan.</li>
+<li>The command classification must be maintained when new build or test tools are added.</li>
+</ul>
+<p>I accept these costs because correctness matters more than token savings at a verification boundary. A smaller context is not useful if the system reaches the wrong conclusion.</p>
+<h3>Discussion</h3>
+<p>This incident changed how I think about AI-facing developer tools. A proxy that rewrites command output is not a transparent pipe. It is part of the program. It has behavior, edge cases, and failure modes. It deserves the same suspicion as any parser or adapter.</p>
+<p>The safest design is to preserve structured signals for structured decisions. Exit codes should remain exit codes. Test counts should come from a test runner’s reliable interface when available. File content should stay byte-for-byte faithful unless transformation is the explicit purpose of the command.</p>
+<p>Summaries still have value. They can identify repeated warnings, highlight likely causes, or present a short overview before raw details. But a summary should be labeled as a summary. It should not impersonate the underlying result.</p>
+<p>There is also a broader lesson for agent evaluation. Checking whether the final response sounds correct is not enough. The execution path must preserve the evidence used to produce that response. Otherwise, a fluent agent may confidently repeat an error introduced upstream.</p>
+<h3>Conclusion</h3>
+<p>The proxy was designed to save tokens, and it did. It also made a failing compiler run look successful. The agent was not verifying the build anymore; it was verifying a sentence produced by another program.</p>
+<p>The fix was to restore the real contract. Build, type-check, and test commands bypass the proxy and use the process exit code directly. Output destined for a file also stays outside the rewriting path.</p>
+<p>My main lesson is simple: anything that summarizes output is a second program that can be wrong. Exit codes are the contract. Prose is not.</p>
+<h3>Other</h3>
+<p>Next, I want to make the boundary more visible. A better design would label transformed output clearly and retain a link or path to the raw log. I also want command policies that distinguish display-only output from verification output and file-bound data.</p>
+<p>I would also like to add tests for the proxy itself. Useful cases would include a command that returns a non-zero exit code with quiet output, a compiler failure caused by missing dependencies, and exact output redirected into a file. These are plans, not features I have completed.</p>
+<h3>Reference</h3>
+<p><strong>Shell exit status</strong></p>
+<p>Bash Reference Manual — Exit Status: <a href="https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html">https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html</a></p>
+<p><strong>TypeScript compiler</strong></p>
+<p>TypeScript Documentation — The Basics: <a href="https://www.typescriptlang.org/docs/handbook/2/basic-types.html">https://www.typescriptlang.org/docs/handbook/2/basic-types.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

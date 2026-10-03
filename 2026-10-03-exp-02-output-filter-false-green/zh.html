@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>省 token 的 CLI proxy，讓失敗的 build 看起來成功了</title></head>
+<body>
+<h1>省 token 的 CLI proxy，讓失敗的 build 看起來成功了</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/zh-cover.png" alt="省 token 的 CLI proxy，讓失敗的 build 看起來成功了"></figure>
+<p>一項實用的最佳化，把失敗的 compiler 執行摘要成「No errors found」，反而成了錯誤的判斷依據。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li>
+<li>概覽</li>
+<li>假成功是怎麼發生的</li>
+<li>修正方式</li>
+<li>優點與缺點</li>
+<li>結論</li>
+<li>其他</li>
+<li>參考</li>
+</ul>
+<h3>前言</h3>
+<p>這篇文章要分享一個 token-saving CLI proxy 引發的失敗。這個 proxy 位在命令列程式與 AI coding agent 之間，工作很簡單：在 agent 讀取輸出之前，先改寫並壓縮冗長內容。</p>
+<p>這個想法很有吸引力。Build log 可能充滿重複內容，test runner 也可能印出數千行訊息。AI agent 不一定需要讀取每一行進度或重複警告。縮短輸出可以減少 agent 使用的 context，也能讓重要訊息更容易被找到。</p>
+<p>但壓縮後的輸出不是 command 本身，而是第二個程式對 command 的解讀。在這次事件裡，這項差異讓 compiler failure 變成看似成功的摘要。</p>
+<p>當時的專案沒有安裝 <strong>node_modules</strong>。執行 TypeScript compiler 應該會失敗。然而，透過 proxy 執行後，agent 收到的句子是「No errors found」。Agent 信任這段摘要，接著回報 build 通過。</p>
+<p>這不是 compiler 的 bug，而是觀測路徑出了問題。真實的 command result 與 agent 看到的內容分開了。</p>
+<h3>概覽</h3>
+<p>原本的流程有三個部分。首先，AI coding agent 選擇 command。接著，proxy 執行或觀察該 command，並壓縮輸出。最後，agent 根據壓縮後的文字做出判斷。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/zh-diagram-1.png" alt="Proxy 把 compiler failure 改成看似成功的摘要"></figure>
+<p><em>失敗路徑：真實的 compiler error 在 agent 判斷前，被改成錯誤的成功摘要。</em></p>
+<p>問題不只是壓縮，而是針對本來就有機器可讀成功訊號的 command，卻把生成的文字當成最終結果。</p>
+<p>Shell command 原本就有精簡的契約，也就是 process exit code。成功的 process 通常回傳零，失敗則回傳非零值。Log 用來說明發生了什麼事，exit code 則告訴呼叫端這次執行是否成功。</p>
+<p>Proxy 把這個契約換成了一句話。句子看起來清楚，內容卻是錯的。由於 agent 只看到改寫後的輸出，它沒有任何獨立證據可以得知底層 process 已經失敗。</p>
+<h3>假成功是怎麼發生的</h3>
+<p><strong>最佳化改變了證據</strong></p>
+<p>一般 output filter 會移除雜訊，同時保留原意。Summarizer 則更進一步：它會判斷哪些行重要、合併訊息，甚至產生結論。這項結論是新的資料。即使原始 command 正常運作，摘要程式仍可能加入錯誤。</p>
+<p>因此需要分開問兩個問題：工具實際回傳了什麼？摘要又說了什麼？如果系統只記錄第二個答案，第一手證據就會消失，除錯也會變得困難。</p>
+<p>這次因為缺少 dependencies，TypeScript compiler 理應失敗，但摘要仍表示沒有錯誤。AI agent 便依照它收到的輸入，把檢查判定為成功。</p>
+<p><strong>為什麼這個結果很有說服力</strong></p>
+<p>「No errors found」又短又肯定，很像開發者完成乾淨的 type-check 後預期看到的結果。它不像警告、不像不確定的猜測，也不像不完整的 log。因此，它比明顯損壞的輸出更危險。</p>
+<p>如果 dependencies 缺失這項事實已從輸入中消失，agent 也沒有理由自行推測。中介程式丟掉或錯誤改寫的證據，無法單靠推理重新找回。</p>
+<p><strong>寫入檔案也有相同風險</strong></p>
+<p>問題不只發生在 build。Proxy 也曾改動 <strong>grep</strong> 的輸出，而該輸出之後會被寫進 environment file。此時被改變的不只是人或 agent 看到的 log，而是 artifact 本身。</p>
+<p>這裡有一條重要界線：給人閱讀的輸出，有時可以摘要；要成為另一個程式輸入的內容，則必須保持精確。一旦轉換後的文字被導向檔案，微小的編輯也可能成為設定錯誤。</p>
+<h3>修正方式</h3>
+<p>我修改了 build、type-check 與 test command 的執行規則。這些 command 不再經過 proxy，而是直接檢查 process exit code。</p>
+<p>要寫入檔案的輸出也採用相同規則。那是資料，不是說明文字，因此同樣繞過 proxy。Proxy 可以協助整理給人看的 log，但不會待在 machine-to-machine 的資料路徑裡。</p>
+<p>修正後的設計把狀態與說明分開。Exit code 是正式依據；需要精確細節時，raw output 仍可使用。精簡摘要可以協助快速瀏覽，但不能把非零 exit code 變成成功。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-03-exp-02-output-filter-false-green/zh-diagram-2.png" alt="關鍵 command 繞過 proxy 並使用真實 exit code"></figure>
+<p><em>已完成的修正：關鍵檢查與檔案輸出繞過 proxy，並由真實 exit code 決定成功或失敗。</em></p>
+<p>這條規則刻意保持簡單。我不需要讓 summarizer 正確分類每一種可能的錯誤，而是直接使用 command-line tool 原本就提供的介面。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul>
+<li>Build、type-check 與 test 的結果會依照真實 process status 判定。</li>
+<li>寫入檔案的資料不會被悄悄改寫。</li>
+<li>低風險、給人閱讀的 command 仍能讓 AI agent 收到較短的 log。</li>
+<li>Trust boundary 更容易說明：文字協助理解，但不負責定義成功。</li>
+</ul>
+<p><strong>缺點</strong></p>
+<ul>
+<li>關鍵 command 不經 proxy 壓縮，可能使用更多 context。</li>
+<li>Raw log 可能含有大量重複細節，讓 agent 較難快速掃描。</li>
+<li>加入新的 build 或 test tool 時，也必須維護 command classification。</li>
+</ul>
+<p>在驗證邊界上，正確性比節省 token 更重要，所以我接受這些成本。如果系統得到錯誤結論，更小的 context 並沒有價值。</p>
+<h3>討論</h3>
+<p>這次事件改變了我看待 AI developer tool 的方式。會改寫 command output 的 proxy 不是透明管線，而是程式的一部分。它有自己的行為、edge case 與 failure mode，應該像 parser 或 adapter 一樣接受檢查。</p>
+<p>較安全的設計，是為結構化判斷保留結構化訊號。Exit code 應維持 exit code。若 test runner 提供可靠介面，test count 就應從該介面取得。除非 transformation 本身就是 command 的明確目的，否則檔案內容應保持完全一致。</p>
+<p>摘要仍然有價值。它可以整理重複警告、標示可能原因，或在 raw details 前先提供概覽。但摘要應被清楚標示為摘要，不應冒充底層的真實結果。</p>
+<p>Agent evaluation 也有更廣泛的教訓。只檢查最終回答聽起來是否正確並不足夠，執行路徑還必須保留產生回答時使用的證據。否則，表達流暢的 agent 可能只是充滿自信地重複上游加入的錯誤。</p>
+<h3>結論</h3>
+<p>這個 proxy 原本為了節省 token，而且確實縮短了輸出；但它也讓失敗的 compiler 執行看起來成功。Agent 不再驗證 build，而是在驗證另一個程式產生的句子。</p>
+<p>修正方式是恢復真正的契約。Build、type-check 與 test command 繞過 proxy，直接使用 process exit code。要送進檔案的輸出也留在改寫路徑之外。</p>
+<p>我的主要教訓很簡單：任何摘要輸出的工具，都是另一個可能出錯的程式。Exit code 才是契約，文字不是。</p>
+<h3>其他</h3>
+<p>下一步，我想讓這條界線更明顯。較好的設計會清楚標記經過轉換的輸出，並保留 raw log 的連結或路徑。我也想建立 command policy，區分純顯示輸出、驗證輸出，以及要寫入檔案的資料。</p>
+<p>我也想替 proxy 本身加入測試。可測試的案例包括：只輸出少量文字但回傳非零值的 command、因 dependencies 缺失而失敗的 compiler，以及需要精確導向檔案的輸出。這些仍是規劃，並非已完成的功能。</p>
+<h3>參考</h3>
+<p><strong>Shell exit status</strong></p>
+<p>Bash Reference Manual — Exit Status: <a href="https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html">https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html</a></p>
+<p><strong>TypeScript compiler</strong></p>
+<p>TypeScript Documentation — The Basics: <a href="https://www.typescriptlang.org/docs/handbook/2/basic-types.html">https://www.typescriptlang.org/docs/handbook/2/basic-types.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
