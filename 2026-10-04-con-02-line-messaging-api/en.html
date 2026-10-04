@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>LINE Messaging API for Builders: Webhooks, Reply vs Push, and User IDs</title></head>
+<body>
+<h1>LINE Messaging API for Builders: Webhooks, Reply vs Push, and User IDs</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-04-con-02-line-messaging-api/en-cover.png" alt="LINE Messaging API for Builders: Webhooks, Reply vs Push, and User IDs"></figure>
+<p>In this blog, I will explain the small set of ideas that makes a LINE bot easier to design, debug, and operate.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>How webhooks enter the system</li>
+<li>Reply messages and push messages</li>
+<li>What a LINE user ID identifies</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>A LINE bot looks simple from the chat screen. A user sends a message, and the bot sends one back. Behind that exchange are several different identities and message paths. The LINE Platform receives the user action. It sends an HTTPS webhook to a bot server. The server verifies the event, decides what to do, and calls the Messaging API.</p>
+<p>The most important design choice is usually not the text of the message. It is whether the message is a reply tied to the current event or a new push to a known destination. The identity model matters too. A LINE user ID is not a universal account key that can be copied across unrelated providers.</p>
+<p>I find it useful to understand these boundaries before choosing an SDK or building a large conversation framework. When the boundary is clear, the code becomes smaller and failures become easier to locate.</p>
+<h3>Overview</h3>
+<p>The basic path has three systems: the user’s LINE app, the LINE Platform, and the bot server. The user does not call the bot server directly. LINE receives the action first and then sends a webhook event to the registered webhook URL.</p>
+<p>The webhook is input, not the final response channel. The bot server reads the event and then sends a separate API request to LINE. For an immediate response, it uses the reply token from the event. For a message initiated later by the service, it uses a push method and a destination such as a user ID.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-04-con-02-line-messaging-api/en-diagram-1.png" alt="Flow from a LINE user action to a verified webhook and a reply or push message"></figure>
+<p><em>The core flow: verify the webhook first, then choose a reply tied to the event or a push to a stored destination.</em></p>
+<p>This separation gives us a useful mental model. Webhooks describe events. Reply tokens authorize a response in the context of an event. User IDs identify destinations within LINE’s provider model. These values should not be treated as interchangeable.</p>
+<h3>How Webhooks Enter the System</h3>
+<p>LINE sends an HTTP POST request when supported events occur. A message from a user is one example. Follow, unfollow, join, leave, postback, and other event types can also arrive. The event object tells the server what happened and includes the context needed for the next action.</p>
+<p><strong>Verify before processing</strong></p>
+<p>A public webhook URL can receive requests from sources other than LINE. The server should verify the request signature before trusting the body. This check confirms that the request came through the LINE Platform and that the body was not changed in transit. Business logic should run only after that verification succeeds.</p>
+<p>Verification must use the raw request body exactly as received. Parsing and rebuilding JSON before verification can change bytes without changing the apparent data. A safer request pipeline keeps the raw body for the signature check and parses it only after the check passes.</p>
+<p><strong>Acknowledge quickly and work safely</strong></p>
+<p>LINE recommends asynchronous processing so later webhook requests do not wait behind a slow event. I would keep the synchronous path narrow: receive, verify, record enough information safely, and return a successful status. Slow database work or external API calls are better handled away from the request path.</p>
+<p>Webhook delivery also requires duplicate-safe processing. LINE documents that the same webhook event can be delivered more than once and provides a webhook event ID for duplicate detection. A handler should therefore make repeated processing harmless. It should also avoid assuming that arrival order always equals event order.</p>
+<h3>Reply Messages and Push Messages</h3>
+<p>The two common send paths solve different problems.</p>
+<p><strong>Reply</strong></p>
+<p>A reply is connected to a user action. The webhook includes a reply token, and the bot sends that token with the reply request. This path is a good fit when the server can answer the current event directly: a user asks a question, taps a postback action, or adds the Official Account.</p>
+<p>The token is event context, not a durable address. I would not store it as if it were a user ID, and I would not design a delayed campaign around it. The practical rule is simple: if the message exists because of the event being processed now, reply is the natural first choice.</p>
+<p><strong>Push</strong></p>
+<p>A push starts from the service rather than from the current webhook. A shipping notice, a reminder, or the result of longer background work can fit this path. The request names a destination, such as a user, group chat, or multi-person chat, depending on the supported method and context.</p>
+<p>Push is not a substitute for good consent and product design. The fact that a server has a destination does not mean every notification is useful. I would store why the destination was collected, what messages the user expects, and whether the relationship is still valid.</p>
+<p><strong>Do not mix the contracts</strong></p>
+<p>A clean application can represent outgoing work with an explicit mode. A reply job requires a reply token and an event reference. A push job requires a destination and a business reason. Making the distinction visible prevents accidental attempts to use an expired event context as a permanent address.</p>
+<h3>What a LINE User ID Identifies</h3>
+<p>A LINE user ID is scoped to a provider. The official documentation states that the same LINE user receives different user IDs under different providers. Channels under the same provider can receive the same user ID for that person, including different channel types such as LINE Login and Messaging API.</p>
+<p>This affects database design. A table that stores only a bare LINE user ID hides an important assumption. I prefer a key that includes provider context, channel context where operationally useful, and the local application user when an account link exists.</p>
+<p>It also affects migrations. Channels cannot simply be treated as movable containers whose identifiers remain universally meaningful. Provider structure should be planned early, especially when one service expects to connect LINE Login and a Messaging API channel for the same users.</p>
+<p>A display name is not a stable join key. It can change and may not be unique. The provider-scoped user ID is better for LINE-side identity, while an explicit account-linking flow is better when the service needs to connect that identity to its own customer record.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>The event-driven boundary keeps the LINE client separate from application logic.</li>
+<li>Reply tokens make the immediate-response path explicit.</li>
+<li>Push methods support service-initiated notifications and background results.</li>
+<li>Provider-scoped IDs can connect channels under one provider without pretending to be global identities.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>There are more identifiers than the chat interface suggests.</li>
+<li>Webhook handling needs signature verification, duplicate protection, and order-aware logic.</li>
+<li>A provider layout chosen without identity planning can make later integration harder.</li>
+<li>A successful API request alone does not prove that the complete user experience is correct.</li>
+</ul>
+<p>For testing, I would cover the full path. First, send a real action from LINE. Then confirm that the expected webhook arrived, its signature passed, the event was processed once, and the intended message appeared in the actual chat. Console settings and endpoint responses are useful evidence, but the user-facing channel is the final check.</p>
+<h3>Conclusion</h3>
+<p>The LINE Messaging API becomes easier to reason about when I separate three ideas. A webhook is an event delivered to my server. A reply token belongs to the current event. A user ID is a provider-scoped destination, not a universal LINE identity.</p>
+<p>From that model, several engineering rules follow naturally: verify signatures before parsing events into business actions, make webhook work duplicate-safe, use replies for immediate event-driven responses, use push for service-initiated messages, and model provider scope in the database.</p>
+<p>The chat UI may hide these boundaries, but reliable bot code should make them visible.</p>
+<h3>Other</h3>
+<p>Next, I want to build a small reference service that records the event ID, actual send mode, provider context, and final delivery decision for every outgoing message. I also want to test redelivery and out-of-order events deliberately instead of waiting for a network problem to reveal weak assumptions.</p>
+<p>A second useful experiment would connect LINE Login and Messaging API channels under one provider, then document exactly which identity values can be joined and which application records still require explicit account linking.</p>
+<h3>Reference</h3>
+<p><strong>LINE Developers — Overview</strong></p>
+<p>Messaging API overview: <a href="https://developers.line.biz/en/docs/messaging-api/overview/">https://developers.line.biz/en/docs/messaging-api/overview/</a></p>
+<p><strong>LINE Developers — Receiving</strong></p>
+<p>Receive messages (webhook): <a href="https://developers.line.biz/en/docs/messaging-api/receiving-messages/">https://developers.line.biz/en/docs/messaging-api/receiving-messages/</a></p>
+<p><strong>LINE Developers — Sending</strong></p>
+<p>Send messages: <a href="https://developers.line.biz/en/docs/messaging-api/sending-messages/">https://developers.line.biz/en/docs/messaging-api/sending-messages/</a></p>
+<p><strong>LINE Developers — Identity</strong></p>
+<p>Get user IDs: <a href="https://developers.line.biz/en/docs/messaging-api/getting-user-ids/">https://developers.line.biz/en/docs/messaging-api/getting-user-ids/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

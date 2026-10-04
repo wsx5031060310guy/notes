@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>開発者のための LINE Messaging API：Webhook、返信とプッシュ、ユーザー ID</title></head>
+<body>
+<h1>開発者のための LINE Messaging API：Webhook、返信とプッシュ、ユーザー ID</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-04-con-02-line-messaging-api/ja-cover.png" alt="開発者のための LINE Messaging API：Webhook、返信とプッシュ、ユーザー ID"></figure>
+<p>この記事では、LINE Bot を設計、デバッグ、運用するときに押さえたい基本を整理します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>はじめに</li><li>概要</li><li>Webhook が届く仕組み</li><li>返信メッセージとプッシュメッセージ</li><li>LINE ユーザー ID が示すもの</li><li>考察</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>はじめに</h3>
+<p>チャット画面だけを見ると、LINE Bot はとても単純に見えます。ユーザーがメッセージを送り、Bot が返事をします。しかし、その裏側には複数の経路と識別子があります。LINE Platform がユーザー操作を受け取り、Bot サーバーへ HTTPS の Webhook を送ります。サーバーはイベントを検証し、処理を決め、Messaging API を呼び出します。</p>
+<p>重要なのは文章だけではありません。その送信が、現在のイベントに結び付いた返信なのか、既知の宛先への新しいプッシュなのかを区別する必要があります。ID の考え方も大切です。LINE ユーザー ID は、関係のない provider 間で共通利用できる万能なアカウントキーではありません。</p>
+<p>私は SDK や大きな会話フレームワークを選ぶ前に、まずこの境界を理解するのがよいと考えています。境界が明確なら、コードは小さくなり、障害箇所も追いやすくなります。</p>
+<h3>概要</h3>
+<p>基本の経路には、ユーザーの LINE アプリ、LINE Platform、Bot サーバーという三つのシステムがあります。ユーザーが Bot サーバーを直接呼ぶわけではありません。LINE が操作を受け取り、登録済み Webhook URL にイベントを送ります。</p>
+<p>Webhook は入力であり、最終的な返信経路そのものではありません。Bot サーバーはイベントを読み、その後に LINE へ別の API リクエストを送ります。その場で返答するならイベント内の reply token を使います。サービス側から後で送るなら、push の送信方法と user ID などの宛先を使います。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-04-con-02-line-messaging-api/ja-diagram-1.png" alt="LINE のユーザー操作から署名検証済み Webhook を経て返信またはプッシュを選ぶ流れ"></figure>
+<p><em>基本の流れ：最初に Webhook を検証し、イベントへの返信か保存済み宛先へのプッシュかを選びます。</em></p>
+<p>この分離から、分かりやすいモデルが得られます。Webhook はイベントを表します。reply token は、そのイベントの文脈で返信するために使います。user ID は LINE の provider モデル内の宛先を表します。これらは交換可能な値ではありません。</p>
+<h3>Webhook が届く仕組み</h3>
+<p>対応するイベントが発生すると、LINE は HTTP POST リクエストを送ります。ユーザーのメッセージは一例です。友だち追加、ブロック、グループ参加、退出、postback などのイベントも届きます。イベントオブジェクトには、何が起きたかと、次の動作に必要な文脈が含まれます。</p>
+<p><strong>処理前に検証します</strong></p>
+<p>公開 Webhook URL には LINE 以外からもリクエストが届く可能性があります。本文を信用する前に署名を検証します。これにより、リクエストが LINE Platform を経由し、転送中に本文が変更されていないことを確認できます。業務処理は検証成功後にだけ実行します。</p>
+<p>署名検証には、受信したままの raw request body を使う必要があります。先に JSON を解析して組み立て直すと、見た目のデータが同じでもバイト列が変わることがあります。raw body で検証し、成功してから解析する順序が安全です。</p>
+<p><strong>すばやく応答し、安全に処理します</strong></p>
+<p>LINE は、後続リクエストが遅い処理を待たないよう、イベントの非同期処理を推奨しています。同期経路は、受信、検証、必要情報の安全な記録、成功ステータスの返却までに絞るのがよいでしょう。時間のかかる資料庫処理や外部 API は、リクエスト経路から分離します。</p>
+<p>Webhook は重複を前提に扱う必要もあります。公式資料では、同じイベントが複数回配信される可能性があり、重複検出用の webhook event ID が提供されています。繰り返し処理されても結果が壊れない設計が必要です。また、受信順序が常に発生順序と一致するとは限りません。</p>
+<h3>返信メッセージとプッシュメッセージ</h3>
+<p>よく使う二つの送信経路は、異なる問題を解決します。</p>
+<p><strong>返信</strong></p>
+<p>返信はユーザー操作と結び付いています。Webhook に reply token が含まれ、Bot は返信リクエストにその token を指定します。ユーザーの質問、postback 操作、友だち追加など、現在のイベントへ直接応答できる場合に適しています。</p>
+<p>token はイベントの文脈であり、永続的な住所ではありません。user ID のように保存したり、遅延キャンペーンの基盤にしたりすべきではありません。「今処理しているイベントが理由で送るメッセージ」なら、まず reply を検討するという単純な規則が役立ちます。</p>
+<p><strong>プッシュ</strong></p>
+<p>プッシュは現在の Webhook ではなく、サービス側から始まります。発送通知、リマインダー、時間のかかるバックグラウンド処理の結果などに向いています。利用する方法と文脈に応じて、ユーザー、グループチャット、複数人チャットなどの宛先を指定します。</p>
+<p>プッシュ機能があっても、同意やプロダクト設計が不要になるわけではありません。サーバーが宛先を持っていても、すべての通知が有益とは限りません。なぜ宛先を保存したか、ユーザーが何を期待しているか、関係が現在も有効かを管理したいところです。</p>
+<p><strong>契約を混ぜません</strong></p>
+<p>送信ジョブに明示的な mode を持たせると設計が明確になります。reply ジョブには reply token とイベント参照が必要です。push ジョブには宛先と業務上の理由が必要です。区別を型や資料庫に表すことで、一時的なイベント文脈を永続的な宛先として使う事故を防げます。</p>
+<h3>LINE ユーザー ID が示すもの</h3>
+<p>LINE ユーザー ID は provider 単位で発行されます。公式資料によれば、同じ LINE ユーザーでも provider が違えば別の user ID になります。同じ provider 配下なら、LINE Login と Messaging API のように channel type が異なっても、同じ人に同じ user ID が発行されます。</p>
+<p>これは資料庫設計に影響します。user ID だけを保存する表は、大切な前提を隠します。私は provider の文脈、運用上必要なら channel の文脈、アカウント連携があるなら自社アプリの user を一緒に管理したいと考えます。</p>
+<p>移行にも関係します。channel を、どこへでも移せて識別子の意味も変わらない容器だとは考えられません。同じユーザーに LINE Login と Messaging API をつなぐ予定があるなら、provider 構成を早い段階で設計すべきです。</p>
+<p>表示名は安定した結合キーではありません。変更されることがあり、一意とも限りません。LINE 側の識別には provider 単位の user ID を使い、自社の会員記録と結び付ける必要がある場合は、明示的な account linking を使う方が安全です。</p>
+<h3>考察</h3>
+<p><strong>利点</strong></p>
+<ul><li>イベント駆動の境界により、LINE client とアプリ処理を分離できます。</li><li>reply token によって即時返信の経路が明確になります。</li><li>push はサービス起点の通知やバックグラウンド処理結果に対応します。</li><li>provider 単位の ID は、世界共通 ID と誤解させずに同一 provider 内の channel を接続できます。</li></ul>
+<p><strong>注意点</strong></p>
+<ul><li>チャット画面から想像するより多くの識別子があります。</li><li>Webhook には署名検証、重複対策、順序を意識した処理が必要です。</li><li>ID 設計なしに provider 構成を決めると、後の統合が難しくなります。</li><li>API リクエストの成功だけでは、ユーザー体験全体の正しさを証明できません。</li></ul>
+<p>テストでは経路全体を確認したいです。まず実際の LINE から操作します。期待する Webhook が届いたか、署名が通ったか、イベントが一度だけ処理されたか、意図したメッセージが実際のチャットに表示されたかを確認します。管理画面や endpoint の応答も証拠になりますが、最後の確認場所はユーザーが使う channel です。</p>
+<h3>まとめ</h3>
+<p>三つの概念を分けると、LINE Messaging API は理解しやすくなります。Webhook はサーバーへ届くイベントです。reply token は現在のイベントに属します。user ID は provider 単位の宛先であり、LINE 全体の共通 ID ではありません。</p>
+<p>このモデルから、自然に設計ルールが導けます。業務処理の前に署名を検証し、Webhook を重複しても安全に処理し、イベントへの即時応答には reply、サービス起点の送信には push を使い、資料庫には provider の範囲を表します。</p>
+<p>チャット UI は境界を隠しますが、信頼できる Bot コードでは境界を明示すべきです。</p>
+<h3>今後</h3>
+<p>次は、すべての送信について event ID、実際の送信 mode、provider 文脈、最終判断を記録する小さな参考サービスを作りたいです。ネットワーク障害を待つのではなく、Webhook の再配信と順序逆転も意図的にテストしたいと考えています。</p>
+<p>もう一つの実験として、同じ provider 配下に LINE Login と Messaging API channel を用意し、どの識別子を結合できるか、どの自社記録には明示的な account linking が必要かを整理したいです。</p>
+<h3>参考</h3>
+<p><strong>LINE Developers — 概要</strong></p>
+<p>Messaging API overview: <a href="https://developers.line.biz/en/docs/messaging-api/overview/">https://developers.line.biz/en/docs/messaging-api/overview/</a></p>
+<p><strong>LINE Developers — 受信</strong></p>
+<p>Receive messages (webhook): <a href="https://developers.line.biz/en/docs/messaging-api/receiving-messages/">https://developers.line.biz/en/docs/messaging-api/receiving-messages/</a></p>
+<p><strong>LINE Developers — 送信</strong></p>
+<p>Send messages: <a href="https://developers.line.biz/en/docs/messaging-api/sending-messages/">https://developers.line.biz/en/docs/messaging-api/sending-messages/</a></p>
+<p><strong>LINE Developers — ID</strong></p>
+<p>Get user IDs: <a href="https://developers.line.biz/en/docs/messaging-api/getting-user-ids/">https://developers.line.biz/en/docs/messaging-api/getting-user-ids/</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
