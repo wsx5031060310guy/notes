@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Five Auto-Replies Were On, but Zero Messages Were Sent</title></head>
+<body>
+<h1>Five Auto-Replies Were On, but Zero Messages Were Sent</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-05-exp-03-toggle-on-never-routed/en-cover.png" alt="Five Auto-Replies Were On, but Zero Messages Were Sent"></figure>
+<p>A green toggle can prove that a rule is enabled while proving nothing about whether a user can ever reach it.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits and Drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I was checking a LINE Official Account that had five auto-reply rules. In the admin console, all five rules were toggled ON. The page showed no warning. At first glance, the configuration looked complete.</p>
+<p>There was one problem: none of those rules had ever sent a message.</p>
+<p>This kind of failure is easy to miss because the visible state looks healthy. The feature exists. The content exists. Every switch says ON. There is no red banner and no obvious error. If I only inspect the settings page, I can easily conclude that the feature is working.</p>
+<p>But an enabled rule is only one condition in a larger routing system. A message must arrive through a path that is allowed to invoke that rule. If another setting makes that path impossible, the rule can remain enabled forever and still never run.</p>
+<h3>Overview</h3>
+<p>The missing condition was the account's response-hours configuration. The auto-replies in this setup only fired outside the configured response hours. The account's response hours were set to cover the entire day. As a result, there was never an “outside” period.</p>
+<p>The five rules were not broken. They were unreachable.</p>
+<p>This distinction matters. A broken rule is reached and then fails. An unreachable rule is never selected. Logs may stay quiet because there is no execution to log. Error monitoring may also stay quiet because nothing throws an error. The system simply chooses another path, or does nothing.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-05-exp-03-toggle-on-never-routed/en-diagram-1.png" alt="How all-day response hours prevented enabled auto-replies from running"></figure>
+<p><em>The actual routing failure and the verified configuration path after the fix.</em></p>
+<p>The lesson is broader than LINE. Product settings often form a small decision engine. One switch controls whether a rule is available. Another controls when it is eligible. A mode controls which handler receives the event. The final behavior comes from all of these conditions together, not from any single toggle.</p>
+<h3>Demo</h3>
+<p><strong>The misleading check</strong></p>
+<p>The first check was simple: open the auto-reply list and look at the status column. Every rule was ON. This answered a narrow question: “Are these rule records enabled?” It did not answer the question that mattered: “Will a real incoming message reach one of these rules?”</p>
+<p>The status view was correct. My interpretation was incomplete.</p>
+<p><strong>Tracing the route</strong></p>
+<p>I then treated the feature as a routing problem. A user sends a message. The platform checks the account's current response configuration. The configured response hours determine whether the message is inside or outside that period. Only the eligible response path can continue to the auto-reply rule.</p>
+<p>Because response hours covered the whole day, every message was classified as inside response hours. The outside-hours branch had no possible time window. The rules on that branch could be ON, but no message could reach them.</p>
+<p><strong>The fix</strong></p>
+<p>I changed the response-hours and response-mode configuration so that the intended auto-reply path could be selected. That changed the routing condition, not the text or status of the five rules.</p>
+<p>I did not stop after saving the settings. I read the platform's own status description to confirm how it interpreted the new configuration. Then I sent a real message from a phone and checked the channel where the user would receive the result. The reply arrived through the intended path.</p>
+<p>This final test was important. The admin console showed configuration. The phone showed behavior.</p>
+<h3>Discussion</h3>
+<p><strong>Control-plane truth is not user-plane truth</strong></p>
+<p>An admin console is a control plane. It tells me what values are stored and what switches are selected. The chat received on a phone is the user plane. It tells me what the customer actually experiences.</p>
+<p>Both views are useful, but they answer different questions. A control-plane check can confirm that I saved a setting. It cannot always confirm that an event traversed every routing condition and produced the intended output.</p>
+<p><strong>ON is not the same as reachable</strong></p>
+<p>Feature flags, notification rules, webhook subscriptions, firewall rules, and scheduled jobs can all have this shape. A component may be enabled but placed behind a condition that never becomes true. The visible switch says “available.” The surrounding system decides “eligible.”</p>
+<p>That is why I now separate three checks in my reasoning:</p>
+<ol>
+<li>Configuration: is the rule present and enabled?</li>
+<li>Routing: can a real event reach the rule under the current conditions?</li>
+<li>Delivery: did the result arrive at the place the user sees?</li>
+</ol>
+<p>If I only perform the first check, I have verified storage, not operation.</p>
+<p><strong>Silent failure can be logically correct</strong></p>
+<p>This case produced no visible warning because the platform was following its configuration. From the platform's point of view, every incoming message was inside response hours. The outside-hours auto-reply path was therefore not selected. There was no contradiction inside the system.</p>
+<p>The contradiction existed between the operator's intention and the combined settings. That class of problem is harder for ordinary error monitoring to detect. It requires a test of the intended behavior.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits of channel-level verification</strong></p>
+<ul>
+<li>It tests the same entry point a real user uses.</li>
+<li>It includes routing conditions that a settings-page check can miss.</li>
+<li>It verifies delivery, not only configuration.</li>
+<li>It exposes misunderstandings about response modes and time windows.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>A manual phone test is slower than reading a toggle.</li>
+<li>One successful message does not prove that every rule and time window works.</li>
+<li>Tests must avoid disturbing real users or creating confusing replies.</li>
+<li>Behavior may depend on the exact response configuration at the time of the test.</li>
+</ul>
+<p>The answer is not to ignore the admin console. It is to combine configuration inspection with a small end-to-end test. Each method covers a different failure mode.</p>
+<h3>Conclusion</h3>
+<p>Five auto-replies were ON, but the account's all-day response hours made their route unreachable. Nothing was wrong with the rule toggles. The surrounding response configuration prevented the rules from ever being selected.</p>
+<p>I fixed the response-hours and response-mode configuration. I then confirmed the platform's own status description and sent a real message from a phone. That test verified the outcome on the channel the user actually receives.</p>
+<p>My main lesson is simple: a switch being on is not evidence that its code path is reachable. When behavior depends on multiple settings, verify the route and the final delivery, not just the most visible toggle.</p>
+<h3>Other</h3>
+<p>I want to turn this lesson into a repeatable review checklist for messaging features. The checklist should ask what event starts the flow, which conditions choose the handler, and where the final output is observed.</p>
+<p>A better design would also make unreachable combinations easier to see. An admin interface could explain that an enabled rule has no active time window, or provide a preview of which handler would respond at a selected time. These are recommendations, not features I verified in this account.</p>
+<p>I also want to test boundary cases when a setup uses response hours: just before a boundary, at the boundary, and just after it. The goal is not to create a large test suite for every small setting. The goal is to prove that the intended path can actually be entered.</p>
+<h3>Reference</h3>
+<p><strong>LINE Developers</strong></p>
+<p>Messaging API overview: <a href="https://developers.line.biz/en/docs/messaging-api/overview/">https://developers.line.biz/en/docs/messaging-api/overview/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
