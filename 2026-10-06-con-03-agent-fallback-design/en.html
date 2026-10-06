@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Designing LLM Fallback Chains That Fail Loudly</title></head>
+<body>
+<h1>Designing LLM Fallback Chains That Fail Loudly</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-06-con-03-agent-fallback-design/en-cover.png" alt="Designing LLM Fallback Chains That Fail Loudly"></figure>
+<p>In this blog, I will explain how to keep an LLM fallback useful without letting it hide a broken primary route.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Why silent fallback is dangerous</li>
+<li>A policy for retries and fallback</li>
+<li>Observability and user labels</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>An LLM fallback chain looks like a reliability feature. If the preferred model cannot answer, the application calls another model. The request still completes. A scheduled job stays green. A user still receives text.</p>
+<p>That behavior is useful during a short outage or a rate-limit event. It is also able to hide a long failure. The backup model may have different reasoning ability, context handling, tool-use behavior, latency, or cost. A valid response proves only that something answered. It does not prove that the model selected by the product policy answered.</p>
+<p>I therefore treat fallback as a degraded operating mode, not as normal success. The application may continue, but it should record the change, expose it to operators, and sometimes expose it to the user. A fallback that nobody can see is not graceful degradation. It is an unreported routing change.</p>
+<h3>Overview</h3>
+<p>A good fallback design starts before the first API call. The request needs an explicit policy. That policy should name the preferred route, define which failures allow a retry, set a retry budget, list acceptable fallback routes, and decide when the whole request must stop.</p>
+<p>The policy should also define the quality contract. A smaller or differently tuned model may be acceptable for classification or a short summary. It may be unacceptable for a security review, a financial decision, or an action that changes external state. One global fallback list cannot express those differences well.</p>
+<p>I prefer to decide fallback eligibility by task class. Each class can state whether degradation is allowed and which tools remain available. The caller then knows whether a completed response satisfies the original contract or only a reduced one.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-06-con-03-agent-fallback-design/en-diagram-1.png" alt="Proposed LLM request flow with bounded retries, a labeled fallback, and an alert"></figure>
+<p><em>Proposed design: retry within a fixed budget, then label and alert whenever a fallback answers.</em></p>
+<h3>Why Silent Fallback Is Dangerous</h3>
+<p><strong>Transport success is not policy success</strong></p>
+<p>Most health checks ask whether the service returned a response. That is a transport question. An LLM router needs a second question: which route produced the response? If the primary route fails and the fallback answers, the endpoint can return a successful HTTP status while the routing policy is unhealthy.</p>
+<p>This distinction matters for scheduled work. A job runner usually records completion, not answer quality. If every task falls back, the dashboard may remain green while the system has changed underneath it. The longer that lasts, the harder it becomes to compare results or explain an unexpected answer.</p>
+<p><strong>Different models are not interchangeable</strong></p>
+<p>Models can follow the same interface and still behave differently. They may format tool calls differently. They may refuse different requests, lose instructions in a long context, or produce a shorter answer than the workflow expects. A fallback chain must not assume that API compatibility means behavioral equivalence.</p>
+<p>The safer approach is to test each approved route against the tasks it may receive. If a route has not been evaluated for a task class, it should not silently receive that task. It can remain available for manual use or for a narrower class with a smaller risk.</p>
+<p><strong>Repeated fallback can become the new normal</strong></p>
+<p>A temporary recovery path often survives longer than expected. If nobody records the actual model, operators see only successful jobs. The primary route can stay broken until a visible quality problem appears. By then, many outputs may already have been produced under a different policy.</p>
+<h3>A Policy for Retries and Fallback</h3>
+<p><strong>Classify the failure</strong></p>
+<p>Not every failure deserves another model. A short network interruption or a provider-side availability error may justify a retry. Invalid credentials, an unsupported model name, or a malformed request usually need configuration or code changes. Sending the same broken request through several routes can waste time and make the original cause harder to see.</p>
+<p>A router should keep the first meaningful error and attach later attempts to it. The final record should show the requested model, every attempted route, the reason for each transition, and the model that finally answered.</p>
+<p><strong>Use a retry budget</strong></p>
+<p>Retries need a limit for attempts and elapsed time. Without a budget, several providers can multiply delays and make one user request occupy resources for too long. Backoff and jitter can reduce synchronized retry traffic, but they do not replace a stop condition.</p>
+<p>The budget also needs to respect the caller. An interactive request and a background report have different time expectations. The caller should be able to choose a policy rather than inherit one hidden global setting.</p>
+<p><strong>Degrade with a label</strong></p>
+<p>When fallback is allowed, the result should carry machine-readable metadata such as the requested route, actual route, fallback reason, attempt count, and policy name. User-facing text does not always need a technical warning, but the application should have enough information to show one when the task is sensitive.</p>
+<p>For high-impact tasks, I would stop instead of returning an unlabeled weaker answer. A clear failure gives an operator a chance to repair the route. A confident-looking answer from an unapproved model may be harder to recover from.</p>
+<h3>Observability and User Labels</h3>
+<p>I would track fallback as its own event, not only as a field inside a large log record. Useful views include the fallback rate by task class, the primary error that caused the transition, the actual answering model, and how long the degraded state lasts.</p>
+<p>An alert should focus on sustained or unusual fallback behavior. One successful fallback may be expected. A rising rate, fallback on every scheduled run, or use of a route outside its approved task class needs attention. The exact threshold depends on the service, so it belongs in the policy rather than in a universal rule.</p>
+<p>Traces help connect the final answer to the attempts before it. Metrics show whether the behavior is growing. Logs preserve the error details. These signals answer different questions, and none of them should replace recording the actual model in the result metadata.</p>
+<p>Labels also improve support. If a user reports a weak answer, the team can check whether the primary or fallback route produced it. Without that fact, debugging turns into guesswork.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>Short provider failures do not have to stop every task.</li>
+<li>Task-specific policies keep sensitive work away from unapproved routes.</li>
+<li>Actual-route metadata makes incidents and quality reports easier to investigate.</li>
+<li>Bounded retries protect latency and resource use.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>The router becomes a policy engine that needs tests and ownership.</li>
+<li>Approved routes must be evaluated again when prompts, tools, or models change.</li>
+<li>User labels can add friction if every harmless transition becomes a warning.</li>
+<li>More telemetry creates more data to store and review.</li>
+</ul>
+<p>The design goal is not to prevent every fallback. It is to make the fallback intentional, bounded, and visible. A system can remain available without pretending that nothing changed.</p>
+<h3>Conclusion</h3>
+<p>An LLM fallback chain should answer two questions: can the request continue, and does the resulting answer still meet the task policy? Traditional uptime checks usually answer only the first.</p>
+<p>I would make the actual answering model part of every result, classify failures before switching routes, apply a retry budget, and alert on fallback behavior over time. For tasks where a weaker route is not acceptable, the correct fallback is a clear failure.</p>
+<p>Graceful degradation works only when the degradation is visible.</p>
+<h3>Other</h3>
+<p>Next, I want to build a small policy test suite. It would inject network errors, rejected model names, malformed requests, and slow responses, then verify the chosen route and the metadata returned to the caller.</p>
+<p>I also want to compare task-level fallback policies with one global chain. The useful result would not be a single quality score. It would be a list of task classes where degradation is acceptable, where a label is required, and where the system must stop.</p>
+<h3>Reference</h3>
+<p><strong>Google Site Reliability Engineering</strong></p>
+<p>Monitoring Distributed Systems: <a href="https://sre.google/sre-book/monitoring-distributed-systems/">https://sre.google/sre-book/monitoring-distributed-systems/</a></p>
+<p><strong>OpenTelemetry</strong></p>
+<p>Generative AI semantic conventions: <a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">https://opentelemetry.io/docs/specs/semconv/gen-ai/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
