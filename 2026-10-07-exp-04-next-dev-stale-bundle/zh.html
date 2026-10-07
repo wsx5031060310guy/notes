@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>HTTP 201、沒有錯誤，但我的新程式根本沒執行</title></head>
+<body>
+<h1>HTTP 201、沒有錯誤，但我的新程式根本沒執行</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/zh-cover.png" alt="HTTP 201、沒有錯誤，但我的新程式根本沒執行"></figure>
+<p>成功回應只能證明 endpoint 有回答，不能證明最新的伺服器端程式真的產生了預期副作用。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>背景</li><li>概覽</li><li>驗證</li><li>討論</li><li>優點與缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>背景</h3>
+<p>我當時正在修改一個 Next.js route handler 與 server action。為了加入副作用，我編輯了伺服器端程式。修改後，我用驗證腳本呼叫 endpoint，收到 HTTP 201，而且沒有任何錯誤。</p>
+<p>檢查結果看起來是綠燈，但新的副作用並未發生。開發伺服器仍在提供上一個 server bundle。我的請求成功了，卻是對舊行為成功。</p>
+<p>這比舊 CSS 更難發現。畫面樣式沒有更新時，我通常一眼就能看出差異。舊的 server bundle 卻仍可回傳有效 status 與熟悉的 response。如果驗證只問「請求是否成功」，就算我想測試的新程式完全沒有執行，答案仍可能是成功。</p>
+<p>HTTP 201 本身並不是假的。endpoint 確實回傳了該 status 所代表的 response。真正的問題，是我把傳輸成功當成另一個 business effect 已發生的證據。</p>
+<h3>概覽</h3>
+<p>這次事件其實有三件不同的事。第一，驗證腳本連到了正在運作的伺服器。第二，該伺服器接受請求並回傳 HTTP 201。第三，因為程序仍在提供舊 bundle，新的副作用沒有執行。</p>
+<p>原本的檢查只涵蓋前兩件事。真正重要的需求是第三件事。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/zh-diagram-1.png" alt="成功請求進入舊 bundle，導致預期副作用沒有發生"></figure>
+<p><em>實際故障：請求對上一個 server bundle 成功，因此新的副作用沒有執行。</em></p>
+<p>修正分成兩部分。我在修改伺服器端程式之後、執行驗證之前，先重新啟動開發伺服器。接著，我直接驗證副作用本身。依變更內容不同，證據可能是資料列、訊息或檔案。我不再以 status code 代替這些證據。</p>
+<h3>驗證</h3>
+<p><strong>容易誤判的檢查</strong></p>
+<p>原本的流程很簡單。我編輯 handler，以腳本呼叫 endpoint，收到 HTTP 201，然後回報成功。這個流程確認了可用性與 response contract，卻沒有辨認是哪一個 server bundle 處理請求。</p>
+<p>Status code 屬於 request-response 邊界。它告訴我伺服器如何回應這次請求，卻不能表示每一個下游效果都已發生，也不能證明執行中的程序包含最新的原始碼變更。</p>
+<p><strong>缺少的觀測</strong></p>
+<p>新程式的目的，是產生一個副作用。那個副作用才是這次變更可觀測的結果。當它不存在時，我不應該讓 status code 結束整個測試。</p>
+<p>這個差異適用於很多系統。API 可能先接受工作，但 background step 之後失敗。queue producer 可能成功，consumer 卻稍後失敗。資料庫寫入可以成功，但 notification 沒有送出。這次直接原因比較單純，就是舊的 server bundle，但測試原則相同：在需求真正成為現實的邊界觀測結果。</p>
+<p><strong>修正方式</strong></p>
+<p>我在完成伺服器端修改後重新啟動開發伺服器。如此一來，下一個請求會由包含預期程式的程序處理。然後，我再次發出請求，並直接檢查副作用。</p>
+<p>如果預期結果是一筆資料，我就讀取那筆資料。如果是訊息，我就在目的地確認訊息。如果是檔案，我就檢查檔案。不同功能需要不同證據，但規則不變：測試 effect，而不是只測 acknowledgement。</p>
+<h3>討論</h3>
+<p><strong>綠燈可能回答了錯的問題</strong></p>
+<p>驗證腳本可以完全正確，卻仍然不夠。我的腳本正確證明 endpoint 回傳 HTTP 201。問題只出在我替這個狹窄結果加上了更廣泛的意義。</p>
+<p>現在，我會把幾個容易混在一起的問題分開：</p>
+<ol><li>請求是否到達伺服器？</li><li>伺服器是否回傳預期 response？</li><li>執行中的伺服器是否使用我想測試的程式？</li><li>預期的 state change 或副作用是否真的發生？</li></ol>
+<p>單一 status assertion 通常只回答第二個問題。</p>
+<p><strong>伺服器端過期更具欺騙性</strong></p>
+<p>前端過期通常留下視覺證據。伺服器端過期則可能維持有效的 protocol response。舊 handler 仍知道如何回應同一條 route，因此不會出現 syntax error、crash 或 failed request。</p>
+<p>這會讓問題看起來像新 logic、外部 service 或驗證腳本出錯。在深入調查這些方向之前，值得先確認執行中的開發程序是否真的載入新的 server-side code。</p>
+<p><strong>驗證應追到效果本身</strong></p>
+<p>最強的檢查通常最接近主張。若我說已建立資料列，就驗證該資料列。若我說訊息已送達，就到目的地確認。若我說檔案已寫入，就檢查該檔案。HTTP success 仍然有用，但它是中途檢查點，不是最終證明。</p>
+<p>這也能避免另一種錯誤：handler 在工作完成前先回應，而我過早回報成功。直接證據能縮小檢查內容與使用者結果之間的落差。</p>
+<h3>優點與缺點</h3>
+<p><strong>效果層級檢查的優點</strong></p>
+<ul><li>驗證需求，而不只是傳輸。</li><li>即使 endpoint 成功，也能發現舊程式。</li><li>為除錯留下更清楚的證據。</li><li>減少狹窄腳本造成的 false green。</li></ul>
+<p><strong>缺點</strong></p>
+<ul><li>需要能存取副作用出現的目的地。</li><li>建立資料、訊息或檔案的測試可能需要清理。</li><li>比只檢查 status code 更慢。</li><li>每種副作用都需要自己的觀測方法。</li></ul>
+<p>答案不是移除 response assertion，而是分層驗證。先檢查 response，再檢查足以支持功能主張的 state change。</p>
+<h3>結論</h3>
+<p>我的驗證腳本收到 HTTP 201，也沒有錯誤，但最新的伺服器端程式並未執行。Next.js 開發伺服器仍在提供上一個 server bundle，因此請求是對舊行為成功。</p>
+<p>我修正了驗證流程：變更 server-side code 後先重新啟動開發伺服器。我也直接檢查副作用，不再把 status code 當成完整證明。</p>
+<p>主要教訓很簡單：成功 response 只證明某個東西成功回答。它不能證明是哪一版程式回答，也不能證明我真正關心的 effect 已經發生。</p>
+<h3>其他</h3>
+<p>我希望在未來的驗證腳本中明確區分這兩者。更好的腳本會分開標示 response check 與 effect check，避免把傳輸綠燈誤認為完整行為已完成。</p>
+<p>我也想記錄每個專案中，哪些 server-side change 需要重新啟動開發伺服器。這是後續計畫，不是本次環境已完成的功能。</p>
+<p>對重要副作用而言，更好的設計會讓結果容易查詢。驗證步驟應該小而明確，並盡可能靠近使用者實際得到的結果。</p>
+<h3>參考</h3>
+<p><strong>Next.js 文件</strong></p>
+<p>Route Handlers: <a href="https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware">https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware</a></p>
+<p>Server Actions and Mutations: <a href="https://nextjs.org/docs/app/getting-started/updating-data">https://nextjs.org/docs/app/getting-started/updating-data</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

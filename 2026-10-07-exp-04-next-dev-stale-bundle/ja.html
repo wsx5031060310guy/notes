@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>HTTP 201、エラーなし、それでも新しいコードは動いていなかった</title></head>
+<body>
+<h1>HTTP 201、エラーなし、それでも新しいコードは動いていなかった</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/ja-cover.png" alt="HTTP 201、エラーなし、それでも新しいコードは動いていなかった"></figure>
+<p>成功レスポンスは endpoint が応答したことを示しますが、最新のサーバーコードが意図した副作用を起こした証拠にはなりません。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>背景</li><li>概要</li><li>検証</li><li>考察</li><li>利点と注意点</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>背景</h3>
+<p>私は Next.js の route handler と server action を作業していました。副作用を追加するため、サーバー側のコードを変更しました。編集後、検証スクリプトから endpoint を呼び出すと、HTTP 201 が返りました。エラーもありませんでした。</p>
+<p>チェックは成功に見えました。しかし、新しい副作用は発生していませんでした。開発サーバーが、以前の server bundle を引き続き配信していたためです。リクエストは古い動作に対して成功していました。</p>
+<p>これは古い CSS より気づきにくい問題です。画面の変更が古ければ、ページを見たときに違いを発見しやすいです。一方、古い server bundle は、正しい status と見慣れた response を返せます。「リクエストが成功したか」だけを確認すると、テストしたかった新しいコードが一度も動いていなくても、答えは成功になります。</p>
+<p>HTTP 201 自体が誤りだったわけではありません。endpoint は、その status が示す response を実際に返しました。問題は、通信の成功を、別の business effect の証拠として扱ったことです。</p>
+<h3>概要</h3>
+<p>この事例には、異なる三つの事実がありました。検証スクリプトは動作中のサーバーへ到達しました。そのサーバーはリクエストを受け付け、HTTP 201 を返しました。しかし、プロセスが古い bundle を配信していたため、新しい副作用は実行されませんでした。</p>
+<p>元の確認が証明したのは、最初の二つだけです。本当に必要だったのは三つ目でした。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/ja-diagram-1.png" alt="成功したリクエストが古い bundle に届き、副作用が発生しなかった流れ"></figure>
+<p><em>実際の失敗：リクエストは以前の server bundle に対して成功し、新しい副作用は実行されませんでした。</em></p>
+<p>修正は二段階でした。サーバー側のコードを変更した後、検証前に開発サーバーを再起動しました。次に、副作用そのものを確認しました。変更内容によって、証拠は対象の row、message、file になります。status code をその代わりにはしませんでした。</p>
+<h3>検証</h3>
+<p><strong>誤解を招いた確認</strong></p>
+<p>最初の流れは単純でした。handler を編集し、スクリプトから endpoint を呼び、HTTP 201 を受け取って成功と判断しました。これは可用性と response contract を確認していますが、どの server bundle がリクエストを処理したかは確認していません。</p>
+<p>Status code は request-response の境界に属する情報です。サーバーがそのリクエストをどう報告したかは分かります。しかし、すべての後続処理が完了したことや、動作中のプロセスが最新の編集を含むことまでは証明しません。</p>
+<p><strong>不足していた観測</strong></p>
+<p>新しいコードの目的は、副作用を発生させることでした。その副作用こそ、変更の観測可能な結果です。それが存在しないなら、status code だけでテストを終了すべきではありません。</p>
+<p>この区別は多くのシステムで役立ちます。API が work を受け付けた後、background step が失敗する場合があります。queue producer が成功しても、consumer が後で失敗する場合があります。database write が成功しても、notification が届かない場合があります。今回の直接的な原因は古い server bundle でしたが、テストの原則は同じです。要件が現実になる境界で結果を観測します。</p>
+<p><strong>修正</strong></p>
+<p>私はサーバー側の編集後に開発サーバーを再起動しました。これにより、次のリクエストは、テストしたいコードから作られたプロセスで処理されます。その後、もう一度リクエストを実行し、副作用を直接確認しました。</p>
+<p>目的が row の作成なら、その row を読みます。message なら送信先で確認します。file なら、その file を調べます。必要な証拠は機能ごとに異なりますが、ルールは変わりません。acknowledgement だけでなく、effect をテストします。</p>
+<h3>考察</h3>
+<p><strong>緑のチェックが別の質問に答える</strong></p>
+<p>検証スクリプトが正しくても、不十分な場合があります。私のスクリプトは endpoint が HTTP 201 を返したことを正しく確認しました。問題は、その狭い結果に広い意味を与えたことです。</p>
+<p>現在は、混同しやすい質問を分けて考えます。</p>
+<ol><li>リクエストはサーバーに到達したか。</li><li>サーバーは期待した response を返したか。</li><li>実行中のサーバーは、テストしたいコードを使っていたか。</li><li>意図した state change または副作用が実際に発生したか。</li></ol>
+<p>一つの status assertion が答えるのは、通常は二番目だけです。</p>
+<p><strong>サーバー側の古さは見抜きにくい</strong></p>
+<p>front-end の古さは、見た目に証拠を残しやすいです。サーバー側の古さは、正しい protocol response を維持できます。以前の handler も同じ route に答えられるため、syntax error、crash、failed request のどれも発生しません。</p>
+<p>そのため、新しい logic、外部 service、検証スクリプトの問題に見えることがあります。それらを深く調べる前に、開発プロセスが新しい server-side code を読み込んだか確認する価値があります。</p>
+<p><strong>副作用まで追う</strong></p>
+<p>最も強い確認は、主張の近くにあります。row を作ったと主張するなら row を確認します。message を配信したなら送信先を確認します。file を書いたなら file を確認します。HTTP success は重要ですが、最終証拠ではなく途中の checkpoint です。</p>
+<p>この考え方は、handler が work 完了前に応答する場合の誤報も防ぎます。直接の証拠は、チェック内容と user outcome のずれを小さくします。</p>
+<h3>利点と注意点</h3>
+<p><strong>effect-level check の利点</strong></p>
+<ul><li>通信だけでなく要件そのものを確認できます。</li><li>endpoint が成功しても古いコードを検出できます。</li><li>debugging に使える明確な証拠が残ります。</li><li>狭いスクリプトによる false green を減らせます。</li></ul>
+<p><strong>注意点</strong></p>
+<ul><li>副作用が現れる場所へのアクセスが必要です。</li><li>row、message、file を作るテストには cleanup が必要な場合があります。</li><li>status code 一つの確認より時間がかかります。</li><li>副作用の種類ごとに観測方法が必要です。</li></ul>
+<p>response assertion を削除する必要はありません。段階を重ねます。response を確認し、その後で機能の主張を裏付ける state change を確認します。</p>
+<h3>まとめ</h3>
+<p>検証スクリプトは HTTP 201 を受け取り、エラーもありませんでした。しかし、最新のサーバー側コードは動いていませんでした。Next.js の開発サーバーが以前の server bundle を配信し、リクエストは古い動作に対して成功していました。</p>
+<p>私は、server-side code の変更後に開発サーバーを再起動するよう検証手順を修正しました。また、status code を証拠として扱うのではなく、副作用そのものを確認しました。</p>
+<p>教訓は単純です。成功 response は、何かが正常に応答したことを示します。しかし、どのコードが応答したか、必要な effect が発生したかまでは証明しません。</p>
+<h3>今後</h3>
+<p>今後の検証スクリプトでは、この区別を明示したいと考えています。response check と effect check を別々に表示すれば、通信の成功を完了した動作と誤解しにくくなります。</p>
+<p>また、各 project でどの server-side change に開発サーバーの再起動が必要かを文書化したいです。これは今回の環境で完成済みの機能ではなく、今後の計画です。</p>
+<p>重要な副作用については、結果を簡単に query できる設計が望ましいです。検証は小さく具体的で、user outcome の近くに置くべきです。</p>
+<h3>参考</h3>
+<p><strong>Next.js ドキュメント</strong></p>
+<p>Route Handlers: <a href="https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware">https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware</a></p>
+<p>Server Actions and Mutations: <a href="https://nextjs.org/docs/app/getting-started/updating-data">https://nextjs.org/docs/app/getting-started/updating-data</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

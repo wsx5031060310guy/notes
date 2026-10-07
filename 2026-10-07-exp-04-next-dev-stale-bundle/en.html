@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>HTTP 201, No Errors, and My New Code Never Ran</title></head>
+<body>
+<h1>HTTP 201, No Errors, and My New Code Never Ran</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/en-cover.png" alt="HTTP 201, No Errors, and My New Code Never Ran"></figure>
+<p>A successful response proved that an endpoint answered, but it did not prove that my latest server-side code produced the intended effect.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Background</li><li>Overview</li><li>Demo</li><li>Discussion</li><li>Benefits and Drawbacks</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Background</h3>
+<p>I was working on a Next.js route handler and server action. I changed server-side code to add a side effect. After the edit, I ran a verification script against the endpoint. The response was HTTP 201. No error appeared.</p>
+<p>The check looked green, but the new side effect had not happened. The development server was still serving the previous server bundle. My request succeeded against old behavior.</p>
+<p>This was harder to notice than stale CSS. A stale visual change is often obvious when I look at the page. A stale server bundle can return a valid status and a familiar response. If my verification asks only whether the request succeeded, the answer can be yes even though the code I meant to test never ran.</p>
+<p>The problem was not that HTTP 201 was false. The endpoint really did create the response represented by that status. The problem was that I treated transport success as evidence for a separate business effect.</p>
+<h3>Overview</h3>
+<p>There were three different facts in this incident. First, the verification script reached a running server. Second, that server accepted the request and returned HTTP 201. Third, the new side effect did not execute because the process was serving an older bundle.</p>
+<p>Only the first two facts were covered by the original check. The third fact was the requirement that mattered.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-07-exp-04-next-dev-stale-bundle/en-diagram-1.png" alt="A successful request reaching a stale server bundle and missing the intended side effect"></figure>
+<p><em>The actual failure: the request succeeded against the previous server bundle, so the new side effect never ran.</em></p>
+<p>The fix had two parts. I restarted the development server after changing server-side code and before verifying it. Then I verified the side effect itself. Depending on the change, that evidence could be the expected row, message, or file. I did not use the status code as a substitute for that evidence.</p>
+<h3>Demo</h3>
+<p><strong>The misleading verification</strong></p>
+<p>The original flow was simple. I edited the handler. I called the endpoint with a script. The script received HTTP 201 and reported success. This flow checked availability and the response contract, but it did not identify which server bundle handled the request.</p>
+<p>A status code belongs to the request-response boundary. It says what the server chose to report for that request. It does not say that every downstream effect occurred, and it does not prove that the running process contains the latest source edit.</p>
+<p><strong>The missing observation</strong></p>
+<p>The new code was supposed to produce a side effect. That effect was the observable result of the change. When it was absent, the status code should not have been allowed to close the test.</p>
+<p>This distinction is useful in many systems. An API can accept work before a background step finishes. A queue producer can succeed while a consumer later fails. A database write can succeed while a notification does not. In my case, the simpler issue was a stale server bundle, but the testing principle is the same: observe the requirement at the boundary where it becomes real.</p>
+<p><strong>The fix</strong></p>
+<p>I restarted the development server after the server-side edit. That ensured the next request was handled by a process built from the code I intended to test. I then ran the request again and inspected the side effect directly.</p>
+<p>If the intended result is a row, I should read that row. If it is a message, I should verify the message at its destination. If it is a file, I should inspect the file. The exact evidence changes with the feature, but the rule does not: test the effect, not only the acknowledgement.</p>
+<h3>Discussion</h3>
+<p><strong>Green checks can answer the wrong question</strong></p>
+<p>A verification script can be completely correct and still be insufficient. Mine correctly established that an endpoint returned HTTP 201. It failed only when I gave that narrow result a broader meaning.</p>
+<p>I now separate questions that are easy to blur together:</p>
+<ol><li>Did the request reach a server?</li><li>Did the server return the expected response?</li><li>Was the running server using the code I meant to test?</li><li>Did the intended state change or side effect actually occur?</li></ol>
+<p>A single status assertion usually answers only the second question.</p>
+<p><strong>Server-side staleness is deceptive</strong></p>
+<p>Front-end staleness often leaves visual evidence. Server-side staleness may preserve a valid protocol response. The older handler may still know how to answer the same route. There is no syntax error, crash, or failed request to attract attention.</p>
+<p>That makes the failure look like a problem in the new logic, an external service, or the verification script. Before investigating those paths, it is worth confirming that the running development process actually loaded the new server-side code.</p>
+<p><strong>Verification should follow the effect</strong></p>
+<p>The strongest check is usually close to the claim. If I claim that a row was created, I verify the row. If I claim that a message was delivered, I verify the destination. If I claim that a file was written, I verify the file. HTTP success remains useful, but it is an earlier checkpoint, not the final proof.</p>
+<p>This also prevents a different mistake: reporting success when a handler acknowledges work before the work is complete. Direct evidence narrows the gap between what a check says and what a user needs.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits of effect-level checks</strong></p>
+<ul><li>They verify the requirement rather than only the transport.</li><li>They expose stale code even when the endpoint still returns success.</li><li>They produce clearer evidence for debugging.</li><li>They reduce false-green reports from narrow scripts.</li></ul>
+<p><strong>Drawbacks</strong></p>
+<ul><li>They require access to the destination where the effect appears.</li><li>They can need cleanup when a test creates rows, messages, or files.</li><li>They are slower than checking one status code.</li><li>Each type of effect needs its own observation method.</li></ul>
+<p>The answer is not to remove response assertions. It is to layer them. Check the response, then check the state change that justifies the feature claim.</p>
+<h3>Conclusion</h3>
+<p>My verification script received HTTP 201 with no errors, but my latest server-side code had not run. The Next.js development server was still serving the previous server bundle, so the request succeeded against old behavior.</p>
+<p>I fixed the verification flow by restarting the development server after changing server-side code. I also checked the side effect itself instead of treating the status code as proof.</p>
+<p>The main lesson is simple: a successful response proves that something answered successfully. It does not prove which code answered, and it does not prove that the effect I care about happened.</p>
+<h3>Other</h3>
+<p>I want to make this distinction explicit in future verification scripts. A better script would label response checks and effect checks separately, so a green transport result cannot be mistaken for completed behavior.</p>
+<p>I also want to document which server-side changes require a development-server restart in each project. That is a plan, not a feature of the setup described here.</p>
+<p>For important side effects, a better design would make the resulting evidence easy to query. The verification step should be small, specific, and close to the user's outcome.</p>
+<h3>Reference</h3>
+<p><strong>Next.js Documentation</strong></p>
+<p>Route Handlers: <a href="https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware">https://nextjs.org/docs/app/getting-started/route-handlers-and-middleware</a></p>
+<p>Server Actions and Mutations: <a href="https://nextjs.org/docs/app/getting-started/updating-data">https://nextjs.org/docs/app/getting-started/updating-data</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
