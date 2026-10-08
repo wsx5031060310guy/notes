@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>Postgres Row Level Security：多租戶 SaaS 隔離機制解析</title></head>
+<body>
+<h1>Postgres Row Level Security：多租戶 SaaS 隔離機制解析</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/zh-cover.png" alt="Postgres Row Level Security：多租戶 SaaS 隔離機制解析"></figure>
+<p>這篇文章會說明如何運用 Postgres Row Level Security，讓租戶邊界貼近資料層，同時避免它成為難以察覺的陷阱。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li>
+<li>Policy 與租戶 context</li>
+<li>ENABLE、FORCE 與繞過角色</li>
+<li>測試租戶隔離</li>
+<li>優點與缺點</li>
+<li>結論</li>
+<li>其他</li>
+<li>參考</li>
+</ul>
+<h3>前言</h3>
+<p>多租戶 SaaS 通常會把許多組織的資料存放在同一個資料庫中，因此多數資料表都會帶有租戶識別欄位。每一筆查詢都只能回傳或修改當前租戶所擁有的資料列。</p>
+<p>應用程式可以在每一筆查詢中加入租戶篩選條件。這種做法容易理解，但只要漏掉一個條件，就可能跨越安全邊界。新增的報表、背景工作或手寫 SQL 都可能忘記這項規則。Code review 能降低風險，資料庫本身卻仍會接受不安全的查詢。</p>
+<p>Postgres Row Level Security 通常簡稱為 RLS，它提供第二道強制管控。Policy 會決定某個 database role 可以查看或變更哪些資料列，並在查詢執行時一併判斷。不符合條件的資料列，會在應用程式收到結果之前就被過濾掉。</p>
+<p>RLS 無法取代一般權限管理、謹慎的連線處理或應用程式授權。它是一層縱深防禦。租戶 context 若能明確設定、生命週期短、經過測試，且可在 log 中辨識，RLS 才能發揮最好的效果。</p>
+<p>RLS 從一張資料表與一個以上的 policy 開始。啟用 RLS 後，一般存取必須由 policy 明確允許。如果沒有可套用的 policy，Postgres 會採取預設拒絕（default deny）。因此，查詢可能只回傳零筆資料，而不是拋出錯誤。</p>
+<p>Policy 可以套用到所有 command，也可以只限定 SELECT、INSERT、UPDATE 或 DELETE；同時也能指定特定 database role。Policy 中的 Boolean expression 會判斷哪些既有資料列可見，以及新寫入的資料內容是否可接受。</p>
+<p>USING expression 控制 command 可以操作哪些資料列，WITH CHECK 則檢查 INSERT 或 UPDATE 所提出的新資料內容。在簡單的 policy 中，如果省略 WITH CHECK，Postgres 可以沿用 USING 條件。不過，當讀取與寫入規則不同時，我偏好把兩者的意圖明確寫出來。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/zh-diagram-1.png" alt="在查詢受 RLS 保護的資料表前先設定租戶 context 的建議 request flow"></figure>
+<p><em>建議的設計：每個 transaction 都先設定租戶 context，再查詢受 RLS 保護的資料表。</em></p>
+<h3>Policy 與租戶 context</h3>
+<p><strong>把邊界放在資料列屬性中</strong></p>
+<p>共用資料表通常需要一個不可為 null 的租戶欄位。Policy 會比較該欄位與目前作用中的租戶 context，讓安全判斷落在每一筆資料列上，也更容易理解與檢查。</p>
+<p>租戶 context 可以來自 transaction-local setting，或其他受控的資料庫機制。真正重要的是它的作用範圍。Connection pool 中的同一條連線會隨時間服務不同租戶，因此 session-wide value 可能殘留到下一個 request。Transaction-local value 較安全，因為 transaction 結束後便會消失。</p>
+<p>應用程式應先開始一個 transaction、設定租戶 context、執行工作，最後 commit 或 roll back。設定 context 與執行查詢必須視為同一個單位。如果查詢在 context 建立前就執行，不應悄悄沿用舊值，也不該採用過度寬鬆的預設值。</p>
+<p><strong>不要在 policy 內進行身分驗證</strong></p>
+<p>應用程式必須先驗證呼叫者身分，之後才能選定租戶。RLS 的工作是強制執行已做出的租戶判斷，而不是自行猜測租戶。Server 應根據可信任的 identity 與 membership data 推導租戶，不可直接接受 request 任意傳入的租戶識別碼。</p>
+<p>租戶內部的授權可能需要一條以上的規則。使用者即使屬於正確租戶，也不一定有權核准發票或編輯其他成員的資料。我會讓 RLS 負責單純的租戶隔離；更細的產品權限則明確放在額外的 policy 或 application service 中處理。</p>
+<p><strong>理解 policy 的組合方式</strong></p>
+<p>Postgres 可以組合多個適用的 policy。Permissive policy 之間以 OR 結合，restrictive policy 之間則以 AND 結合。因此，新增一條 permissive policy 可能擴大存取範圍。審查時必須查看完整的 policy 集合，不能只孤立檢視其中一條。</p>
+<p>如果複雜的 policy 需要查詢其他資料表，也可能帶來效能與 concurrency 問題。官方文件提到，當 policy expression 參照其他位置中持續變動的資料列時，可能出現 race condition。把常用的租戶 predicate 直接放在受保護的資料列上，設計較單純，通常也更容易測試。</p>
+<h3>ENABLE、FORCE 與繞過角色</h3>
+<p>ENABLE ROW LEVEL SECURITY 會對一般資料表存取啟用 policy enforcement。不過，table owner 通常可以繞過 RLS。如果 migration 與測試都以 owner 身分連線，測試結果就可能造成誤解：不安全的查詢看似能正常運作，其實是因為 policy 根本沒有套用。</p>
+<p>FORCE ROW LEVEL SECURITY 會讓 table owner 也受到 policy 約束。當應用程式 process 同時使用 owner role 時，這個設定很有用；不過，把物件擁有權與 runtime access 分開仍是更乾淨的設計。FORCE 無法限制 superuser，也無法限制具有 BYPASSRLS attribute 的 role。</p>
+<p>BYPASSRLS 權限很大。只要 runtime role 帶有這個 attribute，無論 policy 如何設定，都能跨越租戶邊界讀取資料；superuser access 也有相同問題。我只會把這類 role 保留給受控的管理、migration 或復原工作，絕不讓一般 web request 使用。</p>
+<p>最安全的 role 配置其實很樸素：一個 role 擁有 schema object，另一個權限受限的 role 負責執行應用程式。特殊維護工作走獨立流程，並且明確審查。這樣可避免大家為了方便共用某組 credential，卻在不知情的情況下讓保護機制失效。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/zh-diagram-2.png" alt="顯示一般 RLS enforcement 與 privileged bypass 路徑的 role 配置"></figure>
+<p><em>建議的設計：application role 一律受 RLS 約束；owner 或 BYPASSRLS access 則隔離在受控的維護流程中。</em></p>
+<h3>測試租戶隔離</h3>
+<p>只測 happy path 並不夠。有效的隔離測試至少要建立兩個租戶，並為每個租戶準備不同的資料列。測試應使用與正式應用程式相同的 role 連線，設定第一個租戶的 context，接著確認它無法 SELECT、UPDATE 或 DELETE 第二個租戶的資料。</p>
+<p>寫入測試與讀取測試同樣重要。測試套件應嘗試替另一個租戶 INSERT 資料列，也要嘗試修改既有資料列的租戶識別碼。WITH CHECK 應拒絕超出目前作用中邊界的值。</p>
+<p>我也會測試未設定 context 的情況。預期結果必須事先定義清楚：可以由 context expression 拋出錯誤，也可以在 default deny 下回傳零筆資料。對背景工作而言，錯誤通常更容易被察覺。空結果本來就可能是合法的商業結果，因此 context 壞掉的 job 反而可能被誤判為成功。</p>
+<p>Connection pooling 需要獨立測試。透過重複使用的連線依序執行租戶 A 與租戶 B 的工作，再確認 transaction-local context 絕不會殘留。Rollback path 也值得特別檢查，因為即使 database transaction 已關閉，失敗仍可能讓應用程式狀態停在意料之外的位置。</p>
+<p>最後，選幾項測試分別以 owner role 與 application role 執行。兩者的差異能證明 FORCE 是否生效，也可避免 privileged test connection 帶來錯誤的安全感。測試應驗證資料庫實際產生的效果，而不只是 HTTP status 或 repository 的回傳值。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul>
+<li>即使某筆查詢忘了加入租戶篩選條件，資料庫仍會強制隔離租戶。</li>
+<li>只要共用受限制的 runtime role，policy 也能涵蓋 ad hoc SQL 路徑。</li>
+<li>缺少 policy 時，default deny 可防止資料意外曝光。</li>
+<li>隔離規則靠近受保護的資料，能直接進行測試。</li>
+</ul>
+<p><strong>缺點</strong></p>
+<ul>
+<li>被過濾的資料列看起來可能只是正常的空結果。</li>
+<li>Owner、superuser 與 BYPASSRLS 的行為可能讓測試產生誤導。</li>
+<li>Pooled connection 要求團隊嚴格管理 transaction scope 內的 context。</li>
+<li>大量重疊或跨資料表的 policy 會變得難以稽核與調校。</li>
+</ul>
+<p>RLS 最適合維持一條範圍明確的不變條件：這個 runtime request 只能操作當前租戶的資料列。如果試圖把所有產品規則都塞進一大段 policy expression，RLS 的設計與維護反而會變弱。</p>
+<h3>結論</h3>
+<p>Postgres RLS 能把租戶隔離從反覆遵守的 coding convention，提升為資料庫強制維持的不變條件。必要元件包括清楚的租戶欄位、分別保護讀寫的 policy、每個 transaction 都重新設定的 context，以及無法繞過 enforcement 的 application role。</p>
+<p>ENABLE 與 FORCE 不能互換。Table owner 通常會繞過 RLS，FORCE 則讓 owner 也受到 policy 約束；superuser 與 BYPASSRLS role 仍然可以繞過。測試必須使用符合實際環境的 role，除了跨租戶讀取，也必須嘗試跨租戶寫入。</p>
+<p>我會把非預期的空結果視為一項安全警訊，排程工作尤其如此。Fail-closed behavior 能保護資料，但維運端仍需要足夠的可觀測性，才能分辨「確實沒有資料」與「租戶 context 根本沒設定」。</p>
+<h3>其他</h3>
+<p>下一步，我想做一套小型、可重複使用的隔離測試 harness。它會建立兩個租戶，逐一執行 SELECT、INSERT、UPDATE 與 DELETE，並透過重複使用的 pooled connection 再跑一次所有檢查。</p>
+<p>我也想整理一套維護流程，處理確實需要跨租戶存取的工作。目標是讓這條路徑保持獨立、明確且可稽核，並確保一般 request handler 無法使用。</p>
+<h3>參考</h3>
+<p><strong>PostgreSQL 官方文件</strong></p>
+<p>Row Security Policies：<a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">https://www.postgresql.org/docs/current/ddl-rowsecurity.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

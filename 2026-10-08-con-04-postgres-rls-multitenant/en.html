@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Postgres Row Level Security for Multi-Tenant SaaS, Explained</title></head>
+<body>
+<h1>Postgres Row Level Security for Multi-Tenant SaaS, Explained</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/en-cover.png" alt="Postgres Row Level Security for Multi-Tenant SaaS, Explained"></figure>
+<p>In this blog, I will explain how Postgres Row Level Security can keep tenant boundaries close to the data without becoming an invisible trap.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Policies and tenant context</li>
+<li>ENABLE, FORCE, and bypass roles</li>
+<li>Testing tenant isolation</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>A multi-tenant SaaS usually stores data for many organizations in the same database. Most tables then carry a tenant identifier. Every query must return or modify only rows that belong to the active tenant.</p>
+<p>Application code can add a tenant filter to every query. That is easy to understand, but one missing condition can cross a security boundary. A new report, background job, or raw SQL statement can forget the rule. Code review helps, but the database still accepts the unsafe query.</p>
+<p>Postgres Row Level Security, usually called RLS, adds a second enforcement point. A policy decides which rows a database role may see or change. The policy is evaluated as part of the query. Rows that do not satisfy it are filtered before the application receives them.</p>
+<p>RLS does not remove the need for normal permissions, careful connection handling, or application authorization. It is a defense layer. It works best when the tenant context is explicit, short-lived, tested, and visible in logs.</p>
+<h3>Overview</h3>
+<p>RLS begins with a table and one or more policies. After RLS is enabled, normal access must be allowed by a policy. If no applicable policy exists, Postgres uses default deny. The query may therefore return no rows instead of raising an error.</p>
+<p>A policy can apply to all commands or only to SELECT, INSERT, UPDATE, or DELETE. It can target particular database roles. Its Boolean expressions decide which existing rows are visible and which new row values are acceptable.</p>
+<p>The USING expression controls rows available to a command. WITH CHECK controls rows proposed by INSERT or UPDATE. If WITH CHECK is omitted in a simple policy, Postgres can reuse the USING condition. I prefer to write the intent clearly when read rules and write rules differ.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/en-diagram-1.png" alt="A proposed request flow that sets tenant context before an RLS-protected query"></figure>
+<p><em>Proposed design: set the tenant context inside each transaction before querying an RLS-protected table.</em></p>
+<h3>Policies and Tenant Context</h3>
+<p><strong>Put the boundary in a row attribute</strong></p>
+<p>A shared table normally needs a tenant column that cannot be null. The policy compares that value with the active tenant context. This makes the security decision local to each row and easy to reason about.</p>
+<p>The context can come from a transaction-local setting or another controlled database mechanism. The important property is scope. A pooled connection may serve different tenants over time, so a session-wide value can leak into the next request. A transaction-local value is safer because it disappears when the transaction ends.</p>
+<p>The application should begin a transaction, set the tenant context, run the work, and commit or roll back. Setting context and running the query must be one unit. A query that executes before the context exists should not quietly use an old value or a broad default.</p>
+<p><strong>Keep authentication outside the policy</strong></p>
+<p>The application must authenticate the caller before selecting a tenant. RLS should enforce a tenant decision, not invent one. The server should derive the tenant from trusted identity and membership data rather than accept an arbitrary tenant identifier from a request.</p>
+<p>Authorization within a tenant may need more than one rule. A user could belong to the correct tenant but still lack permission to approve an invoice or edit another member. I would keep simple tenant isolation in RLS and apply detailed product permissions deliberately, either in additional policies or in application services.</p>
+<p><strong>Understand policy composition</strong></p>
+<p>Postgres can combine multiple applicable policies. Permissive policies are combined with OR, while restrictive policies are combined with AND. Adding a permissive policy can therefore broaden access. A policy review should consider the complete set, not one policy in isolation.</p>
+<p>Complex policies that query other tables can also introduce performance and concurrency concerns. The official documentation describes race conditions that can occur when policy expressions consult changing rows elsewhere. Keeping the common tenant predicate on the protected row is simpler and usually easier to test.</p>
+<h3>ENABLE, FORCE, and Bypass Roles</h3>
+<p>ENABLE ROW LEVEL SECURITY activates policy enforcement for normal table access. However, the table owner normally bypasses RLS. That can surprise a test suite if migrations and tests connect as the owner: unsafe queries appear to work because the policy is not being applied.</p>
+<p>FORCE ROW LEVEL SECURITY makes the table owner subject to the policies too. It is useful when the owner role is also used by application processes, although separating ownership from runtime access is a cleaner design. FORCE does not constrain superusers or roles with the BYPASSRLS attribute.</p>
+<p>BYPASSRLS is powerful. A runtime role with that attribute can read across tenant boundaries regardless of policy. Superuser access has the same issue. I would reserve those roles for controlled administration, migrations, or recovery, and never use them for ordinary web requests.</p>
+<p>The safest role layout is boring. One role owns schema objects. A different, limited role runs the application. Special maintenance work uses a separate path with explicit review. This makes it harder for a convenient credential to silently defeat the protection.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-08-con-04-postgres-rls-multitenant/en-diagram-2.png" alt="Role paths showing normal RLS enforcement and privileged bypass paths"></figure>
+<p><em>Proposed design: keep the application role under RLS and isolate owner or BYPASSRLS access for controlled maintenance.</em></p>
+<h3>Testing Tenant Isolation</h3>
+<p>A happy-path test is not enough. A useful isolation suite creates at least two tenants and distinct rows for each. It connects with the same role used by the application, sets the first tenant context, and verifies that the second tenant's rows cannot be selected, updated, or deleted.</p>
+<p>Write tests matter as much as read tests. The suite should try to insert a row for another tenant and change the tenant identifier on an existing row. WITH CHECK should reject values outside the active boundary.</p>
+<p>I would also test missing context. The expected result should be deliberate: either an error raised by the context expression or zero rows under default deny. An error is often easier to detect in background work. An empty result may be a valid business result, so it can let a broken job report success.</p>
+<p>Connection pooling needs its own test. Run work for tenant A and tenant B through reused connections, then confirm that transaction-local context never survives. Rollback paths deserve attention because failures can leave application state in unexpected places even when the database transaction is closed.</p>
+<p>Finally, run selected tests under the owner role and the application role. The difference demonstrates whether FORCE is active and prevents a privileged test connection from giving false confidence. Tests should verify the database effect, not only an HTTP status or repository return value.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>The database enforces tenant filters even when one query forgets them.</li>
+<li>Policies cover ad hoc SQL paths that share the restricted runtime role.</li>
+<li>Default deny can prevent accidental visibility when a policy is missing.</li>
+<li>Isolation rules live near the protected data and can be tested directly.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>Filtered rows can look like legitimate empty results.</li>
+<li>Owner, superuser, and BYPASSRLS behavior can make tests misleading.</li>
+<li>Pooled connections require disciplined transaction-scoped context.</li>
+<li>Many overlapping or cross-table policies become difficult to audit and tune.</li>
+</ul>
+<p>RLS is strongest as a narrow invariant: this runtime request may touch only rows for its active tenant. It is weaker when asked to encode every product rule in one large policy expression.</p>
+<h3>Conclusion</h3>
+<p>Postgres RLS can make tenant isolation a database invariant rather than a repeated coding convention. The key pieces are a clear tenant column, policies for reads and writes, context set per transaction, and an application role that cannot bypass enforcement.</p>
+<p>ENABLE and FORCE are not interchangeable. Table owners normally bypass RLS, while FORCE subjects the owner to policies. Superusers and BYPASSRLS roles still bypass them. Tests must use realistic roles and must attempt cross-tenant writes as well as reads.</p>
+<p>I would treat an unexpected empty result as a security signal, especially in scheduled jobs. Fail-closed behavior protects data, but operations still need enough visibility to distinguish “nothing exists” from “the tenant context is missing.”</p>
+<h3>Other</h3>
+<p>Next, I want to build a small reusable isolation test harness. It would create two tenants, exercise SELECT, INSERT, UPDATE, and DELETE, and repeat the checks across reused pooled connections.</p>
+<p>I also want to document a maintenance pattern for work that genuinely needs cross-tenant access. The goal is to keep that path separate, explicit, audited, and unavailable to ordinary request handlers.</p>
+<h3>Reference</h3>
+<p><strong>PostgreSQL Documentation</strong></p>
+<p>Row Security Policies: <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">https://www.postgresql.org/docs/current/ddl-rowsecurity.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
