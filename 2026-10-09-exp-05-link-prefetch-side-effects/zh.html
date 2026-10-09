@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>next/link 替每位訪客按下了下載按鈕</title></head>
+<body>
+<h1>next/link 替每位訪客按下了下載按鈕</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/zh-cover.png" alt="next/link 替每位訪客按下了下載按鈕"></figure>
+<p>這篇文章會說明一個看似無害的 Next.js 匯出連結，如何替每位訪客產生含有客戶資料的 CSV。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li>
+<li>概觀</li>
+<li>示範</li>
+<li>討論</li>
+<li>優點與缺點</li>
+<li>結論</li>
+<li>其他</li>
+<li>參考</li>
+</ul>
+<h3>前言</h3>
+<p>管理頁面上有一個 CSV 匯出連結。這個頁面使用以 Next.js Link 為基礎的共用連結元件。目的地看起來就是一般 URL，因此沿用應用程式其他地方的相同元件，當時看起來很合理。</p>
+<p>但目的地並不是一般頁面，而是透過 GET 呼叫的 API endpoint。每次收到 request，它都會記錄一次報表讀取，並產生含有客戶資料的 CSV。換句話說，即使沒有人下載或開啟結果，只要讀取 URL 就會執行具有實際影響的工作。</p>
+<p>在正式環境中，只要開啟管理頁面，endpoint 就會在背景被觸發。沒有人需要按下匯出連結。結果是報表使用指標變成預期的約三倍，同時在沒有使用者點擊的情況下產生敏感 CSV 檔案。</p>
+<p>本機環境沒有出現這個問題。Next.js 在開發模式不會 prefetch，但正式環境可能在連結進入 viewport 時預先載入。我的本機測試只檢查點擊後的流程，從未重現造成事故的背景 request。</p>
+<h3>概觀</h3>
+<p>Next.js Link 的目的是讓頁面導覽感覺更快。Route 適用自動 prefetch 時，它可以在使用者點擊前載入 route data。當目的地是頁面，而且讀取動作安全時，這是很實用的功能。</p>
+<p>瀏覽器不了解 URL 在業務上的意義。Prefetcher 只看到一個可能很快會用到的資源，接著送出 request。Crawler、連結預覽服務、安全掃描器與瀏覽器功能也可能發出類似 request。這些工具都不保證背後真的有人想執行該操作。</p>
+<p>這項差異正是 HTTP 將 GET 稱為 safe method 的原因。Safe 不代表 server 完全不能做事，記錄 log 與 cache 都是正常行為；它代表 client 並未要求改變狀態。把產生敏感匯出檔與計算報表已讀綁在 GET 上，就等於把業務副作用放進基礎設施可以推測性呼叫的 request。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/zh-diagram-1.png" alt="從管理頁面預先載入到指標暴增與 CSV 生成的實際事故流程"></figure>
+<p><em>實際事故：正式環境的 prefetch 讀取匯出連結，沒有點擊也記錄報表讀取並產生敏感 CSV。</em></p>
+<h3>示範</h3>
+<p>不需要複雜的重現環境，也能理解問題如何發生。首先，在管理頁面上以 Next.js Link 顯示一個 /api/ 路徑，目的地是 CSV 匯出。接著 build 並執行正式版本。當連結符合 prefetch 條件時，framework 可能在任何點擊之前要求該 URL。</p>
+<p>在這個 endpoint 中，一次 request 會造成兩個可觀察的結果。第一個結果是記錄報表讀取，並把它納入使用指標；第二個結果是產生客戶資料 CSV。即使 response 最後沒有顯示給訪客，server 也已經完成這些工作。</p>
+<p>令人困惑的是，使用者實際點擊時，匯出功能仍然正常。沒有壞掉的按鈕，也沒有明顯的 client error。背景流量只是看起來像真實使用量。指標增加約三倍時，最初的假象是客戶突然大幅增加匯出次數。</p>
+<p>關鍵線索來自正式環境的 network 檢查。頁面閒置時、連結尚未被點擊前，request 就已出現。Endpoint log 與頁面瀏覽次數相符，而非與刻意執行的匯出相符。開發模式沒有這筆 request，因此只用 development server 測試會帶來錯誤的安全感。</p>
+<h3>討論</h3>
+<p><strong>我實際完成的修正</strong></p>
+<p>我修改共用連結元件，讓 /api/ URL 不再輸出 Next.js Link，而是輸出一般的 &lt;a&gt; 元素。一般頁面 route 仍然使用 Next.js Link。這是本次事故唯一已完成的修正，也讓這個共用元件不再把 API 連結交給 framework 的導覽 prefetch 機制。</p>
+<p>這項修正放在共用元件中，是因為呼叫端不應替每個下載連結記住特殊 prop。對這個應用程式而言，path 本身就能指出界線。把規則集中在一處，也更容易 review。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/zh-diagram-2.png" alt="把 API 一般 anchor 與 Next.js 頁面連結分離的建議設計"></figure>
+<p><em>建議的設計：API 目的地使用一般 anchor，Next.js Link 保留給頁面導覽；endpoint 重構仍是未來工作。</em></p>
+<p><strong>更深層的問題</strong></p>
+<p>元件修正能阻止這次確認過的 prefetch 路徑，但 endpoint 設計仍有風險。GET URL 可能被 prefetcher、crawler、連結預覽、retry、安全掃描器呼叫，也可能被使用者開在新分頁。任何一種情況都可能再次執行副作用。</p>
+<p>更完整的計畫，是把準備匯出與下載既有結果拆開。系統可用明確的非 GET request，在驗證授權與使用者意圖後建立匯出檔，再透過安全的讀取動作取得已準備好的檔案。這是改善提案，不是本次事故已完成的工作。</p>
+<p>我也建議把產品分析與傳輸事件分開。收到 request 不一定能證明有人執行該名稱所代表的操作。指標應在意圖已確立的位置記錄一次刻意匯出，而 operational log 則分別記錄檔案產生與傳送。</p>
+<p>最後，我計畫新增正式模式測試。它應開啟管理頁面，不點擊並等待，確認沒有建立匯出檔；第二階段才點擊連結，確認只產生一個預期結果。這項測試也是提案，並未包含在已完成的修正內。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul>
+<li>共用元件只需小幅修改，就能保護所有透過它顯示的 /api/ 連結。</li>
+<li>頁面導覽仍可保留 Next.js Link 的效能優勢。</li>
+<li>程式碼會清楚呈現頁面導覽與 API 存取的差異。</li>
+<li>一般 anchor 在真實點擊後仍可使用瀏覽器標準下載行為。</li>
+</ul>
+<p><strong>缺點</strong></p>
+<ul>
+<li>Endpoint 仍然是 GET，被呼叫時仍會產生副作用。</li>
+<li>其他 client 仍可在沒有使用者點擊時呼叫 URL。</li>
+<li>Path prefix 規則依賴應用程式的 URL 慣例。</li>
+<li>開發模式依然無法呈現正式環境的 prefetch 行為。</li>
+</ul>
+<p>實務上的教訓不是 prefetch 很危險。Prefetch 是為了導覽執行有用的工作。真正的教訓是 GET endpoint 必須能承受沒有點擊的呼叫。如果做不到，就表示 method 與 workflow 沒有正確表達真實操作。</p>
+<h3>結論</h3>
+<p>管理頁面上的 Next.js Link，把 CSV 匯出變成每位訪客都會觸發的背景工作。正式環境 prefetch 呼叫 GET endpoint，讓使用指標膨脹到約三倍，並在沒有點擊時產生含客戶資料的敏感 CSV。開發模式不會 prefetch，因此問題在本機被隱藏。</p>
+<p>我已修正共用連結元件，讓 /api/ URL 輸出一般 &lt;a&gt; 元素。這項調整封鎖已觀察到的 prefetch 路徑，同時讓一般頁面繼續使用 Next.js Link。</p>
+<p>更廣泛的原則很簡單：GET 可能由不代表使用者意圖的機器呼叫。Prefetcher、crawler、連結預覽與掃描器都是 Web 的正常組成。具有副作用的操作應採用能明確表達意圖的設計。</p>
+<h3>其他</h3>
+<p>下一步，我計畫重新設計匯出 workflow，加入明確的建立 request、個別授權的下載流程，以及生成檔案的保留政策。我也計畫新增正式模式測試與 alert，分別比較頁面瀏覽、匯出 request 與完成的下載，不再假設它們是同一個 event。</p>
+<p><strong>標籤</strong></p>
+<p>Next.js, Web Security, Privacy, React, Web Development</p>
+<h3>參考</h3>
+<p><strong>Next.js 官方文件</strong></p>
+<p>Prefetching：<a href="https://nextjs.org/docs/app/guides/prefetching">https://nextjs.org/docs/app/guides/prefetching</a></p>
+<p><strong>MDN Web Docs</strong></p>
+<p>Safe (HTTP Methods)：<a href="https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP">https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

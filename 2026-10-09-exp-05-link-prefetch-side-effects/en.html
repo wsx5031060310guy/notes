@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>next/link Pressed My Download Button for Every Visitor</title></head>
+<body>
+<h1>next/link Pressed My Download Button for Every Visitor</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/en-cover.png" alt="next/link Pressed My Download Button for Every Visitor"></figure>
+<p>In this blog, I will describe how a harmless-looking Next.js export link started generating a customer-data CSV for every visitor.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>I had an admin page with a CSV export link. The page used a shared link component based on Next.js Link. The destination looked like an ordinary URL, so using the same component as the rest of the application seemed reasonable.</p>
+<p>The destination was not an ordinary page. It was an API endpoint reached with GET. Each request recorded a report read and generated a CSV containing customer data. In other words, fetching the URL performed meaningful work even when nobody downloaded or opened the result.</p>
+<p>In production, opening the admin page was enough to trigger that endpoint in the background. No one had to press the export link. The result was about three times the expected usage in the report metrics, plus sensitive CSV files generated without a user click.</p>
+<p>The issue was absent locally. Next.js does not prefetch in development, while production can prefetch links when they enter the viewport. My local test therefore checked the click path but never reproduced the background request that caused the incident.</p>
+<h3>Overview</h3>
+<p>Next.js Link is designed to make navigation feel fast. For routes using automatic prefetching, it can load route data before the user clicks. This is useful when the destination is a page and reading it is safe.</p>
+<p>The browser does not understand the business meaning of a URL. A prefetcher sees something that may be useful soon and sends a request. Crawlers, link preview services, security scanners, and browser features can make similar requests. None of them promise that a person intended to perform an action.</p>
+<p>That distinction is why HTTP calls GET a safe method. Safe does not mean that a server can do no work. Logging and caching are normal. It means the client does not request a state change. Generating sensitive exports and counting a report as read tied business side effects to a request that infrastructure is allowed to make speculatively.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/en-diagram-1.png" alt="Actual incident flow from admin page prefetch to metrics and CSV generation"></figure>
+<p><em>Actual incident: production prefetch followed the export link, logged a report read, and generated a sensitive CSV without a click.</em></p>
+<h3>Demo</h3>
+<p>The failure can be understood without a complicated reproduction. First, render an admin page containing a Next.js Link whose destination begins with /api/ and points to a CSV export. Then build and run the production application. When the link becomes eligible for prefetch, the framework may request the URL before any click.</p>
+<p>On this endpoint, one request did two observable things. It logged the report read, which fed usage metrics, and it generated the customer-data CSV. The response did not need to be shown to the visitor for those effects to happen. The server had already done the work.</p>
+<p>The production symptom was confusing because the export function still worked when clicked. There was no broken button and no obvious client error. Instead, background traffic looked like real use. The roughly threefold metric increase initially suggested that customers were exporting much more often.</p>
+<p>Network inspection in production is the important clue. A request appears while the page is idle, before the link receives a click. The endpoint logs line up with page views rather than deliberate exports. In development, that request is missing, so testing only with the development server gives a false sense of safety.</p>
+<h3>Discussion</h3>
+<p><strong>The fix I made</strong></p>
+<p>I changed the shared link component so that /api/ URLs render a plain &lt;a&gt; element instead of Next.js Link. Normal page routes continue to use Next.js Link. This was the only fix made for this incident. It stopped this shared component from offering API links to the framework's navigation prefetch behavior.</p>
+<p>This fix belongs at the shared component because callers should not need to remember a special prop for every download. The path itself identifies the boundary used by this application. Centralizing the rule also makes the behavior easier to review.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/en-diagram-2.png" alt="Proposed design separating API anchors from Next.js page links"></figure>
+<p><em>Proposed design: keep API destinations on plain anchors and reserve Next.js Link for page navigation; redesigning the endpoint remains future work.</em></p>
+<p><strong>The deeper problem</strong></p>
+<p>The component change prevents this particular prefetch path, but the endpoint design remains risky. A GET URL may be requested by prefetchers, crawlers, link previews, retries, scanners, or a person opening it in a new tab. Any of those can repeat the side effects.</p>
+<p>A stronger plan would separate preparing an export from downloading an existing result. An explicit non-GET request could ask the server to create the export after authorization and user intent are checked. A later safe read could retrieve a prepared file. That redesign is a proposal, not something completed in this incident.</p>
+<p>I would also propose separating product analytics from transport events. Receiving a request does not always prove that a person performed the named action. Metrics should record a deliberate export at a point where intent is established, and operational logs should separately record file generation and delivery.</p>
+<p>Finally, I would add a production-mode test. It should load the admin page, wait without clicking, and verify that no export is created. A second step should click the link and verify one intended result. This test is also a proposal; it was not part of the completed fix.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>The shared component fix is small and protects all /api/ links that use it.</li>
+<li>Page navigation keeps the performance benefit of Next.js Link.</li>
+<li>The rule makes the distinction between navigation and API access visible.</li>
+<li>A plain anchor preserves normal browser download behavior after a real click.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>The endpoint is still GET and still performs side effects when requested.</li>
+<li>Other clients can call the URL without a user click.</li>
+<li>A path-prefix rule depends on the application's URL conventions.</li>
+<li>Development mode still cannot demonstrate production prefetch behavior.</li>
+</ul>
+<p>The practical lesson is not that prefetch is dangerous. Prefetch is doing useful work for navigation. The lesson is that a GET endpoint must tolerate being called without a click. If it cannot, the method and workflow do not express the real operation.</p>
+<h3>Conclusion</h3>
+<p>A Next.js Link on an admin page turned a CSV export into background work for every visitor. Production prefetch called the GET endpoint, inflated usage metrics by about three times, and generated sensitive customer-data CSVs without clicks. Development mode hid the issue because it does not prefetch.</p>
+<p>I fixed the shared link component to render plain &lt;a&gt; elements for /api/ URLs. That closes the observed prefetch path while keeping Next.js Link for normal pages.</p>
+<p>The broader rule is simple: treat GET as callable by machines that do not represent user intent. Prefetchers, crawlers, link previews, and scanners are normal parts of the web. Side-effecting operations should use a design that makes intent explicit.</p>
+<h3>Other</h3>
+<p>Next, I plan to redesign the export workflow around an explicit creation request, a separately authorized download, and a clear retention policy for generated files. I also plan to add production-mode tests and alerts that compare page views, export requests, and completed downloads without assuming they are the same event.</p>
+<p><strong>Tags</strong></p>
+<p>Next.js, Web Security, Privacy, React, Web Development</p>
+<h3>Reference</h3>
+<p><strong>Next.js Documentation</strong></p>
+<p>Prefetching: <a href="https://nextjs.org/docs/app/guides/prefetching">https://nextjs.org/docs/app/guides/prefetching</a></p>
+<p><strong>MDN Web Docs</strong></p>
+<p>Safe (HTTP Methods): <a href="https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP">https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

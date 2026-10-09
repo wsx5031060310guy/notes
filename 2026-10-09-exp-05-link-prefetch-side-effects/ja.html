@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>next/link が全訪問者のダウンロードボタンを押していた</title></head>
+<body>
+<h1>next/link が全訪問者のダウンロードボタンを押していた</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/ja-cover.png" alt="next/link が全訪問者のダウンロードボタンを押していた"></figure>
+<p>この記事では、何の問題もなさそうに見えた Next.js のエクスポートリンクが、訪問者ごとに顧客データの CSV を生成していた事例を説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul>
+<li>はじめに</li>
+<li>概要</li>
+<li>デモ</li>
+<li>考察</li>
+<li>利点と欠点</li>
+<li>まとめ</li>
+<li>今後</li>
+<li>参考</li>
+</ul>
+<h3>はじめに</h3>
+<p>管理画面に CSV のエクスポートリンクがありました。この画面では、Next.js Link をベースにした共通リンクコンポーネントを使っていました。遷移先は通常の URL に見えたため、アプリケーションの他の場所と同じコンポーネントを使うことは自然に思えました。</p>
+<p>しかし、遷移先は通常のページではありませんでした。GET で呼ばれる API endpoint です。リクエストを受けるたびにレポートの閲覧を記録し、顧客データを含む CSV を生成していました。つまり、利用者が結果をダウンロードしたり開いたりしなくても、URL を取得するだけで意味のある処理が実行されました。</p>
+<p>本番環境では、管理画面を開くだけで endpoint がバックグラウンドから呼ばれました。エクスポートリンクを誰かが押す必要はありません。その結果、レポートの利用指標は想定のおよそ三倍になり、クリックされていないのに機密性のある CSV ファイルが生成されました。</p>
+<p>この問題はローカル環境では発生しませんでした。Next.js は開発モードでは prefetch しませんが、本番環境ではリンクが viewport に入ると prefetch する場合があります。ローカルテストはクリック後の経路だけを確認しており、障害を起こしたバックグラウンドリクエストを再現していませんでした。</p>
+<h3>概要</h3>
+<p>Next.js Link は、画面遷移を速く感じさせるための仕組みです。自動 prefetch の対象となる route では、利用者がクリックする前に route data を読み込めます。遷移先がページであり、読み取りが安全であれば便利な機能です。</p>
+<p>ブラウザーは URL の業務上の意味を理解しません。Prefetcher は、まもなく必要になりそうな URL を見つけてリクエストを送ります。Crawler、link preview service、security scanner、ブラウザー機能も似たリクエストを送ることがあります。どれも、人がその操作を実行しようとしたことを保証しません。</p>
+<p>HTTP で GET が safe method とされるのは、この違いがあるためです。Safe とは、サーバーが一切処理できないという意味ではありません。ログや cache は通常の処理です。重要なのは、client が状態変更を要求していないことです。機密 export の生成とレポート閲覧の計上を GET に結び付けると、基盤が投機的に呼んでもよいリクエストに業務上の副作用が発生します。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/ja-diagram-1.png" alt="管理画面の prefetch から指標増加と CSV 生成に至った実際の障害フロー"></figure>
+<p><em>実際の障害：本番環境の prefetch がエクスポートリンクを取得し、クリックなしで閲覧を記録して機密 CSV を生成しました。</em></p>
+<h3>デモ</h3>
+<p>複雑な再現環境がなくても失敗の流れは理解できます。まず、CSV export を行う /api/ 配下の URL を Next.js Link の遷移先として管理画面に表示します。次に、本番用に build してアプリケーションを実行します。リンクが prefetch の対象になると、framework はクリック前に URL をリクエストする場合があります。</p>
+<p>この endpoint では、一回のリクエストが二つの目に見える結果を生みました。一つは利用指標に使うレポート閲覧の記録、もう一つは顧客データ CSV の生成です。Response が訪問者に表示されなくても、サーバー側では処理がすでに完了していました。</p>
+<p>エクスポート機能はクリック時にも正常に動いたため、症状は分かりにくいものでした。壊れたボタンも明らかな client error もありません。代わりに、バックグラウンド通信が実際の利用に見えました。およそ三倍に増えた指標からは、当初、顧客が急に export を多用し始めたように見えました。</p>
+<p>重要な手掛かりは、本番環境での network の確認です。ページが待機中で、リンクがクリックされる前にリクエストが現れます。Endpoint の log は意図的な export ではなく、ページ表示と対応していました。開発モードではこのリクエストがないため、development server だけで確認すると安全だと誤認します。</p>
+<h3>考察</h3>
+<p><strong>今回実施した修正</strong></p>
+<p>共通リンクコンポーネントを変更し、/api/ URL では Next.js Link ではなく通常の &lt;a&gt; 要素を出力するようにしました。通常のページ route は引き続き Next.js Link を使います。今回実施した修正はこれだけです。これにより、この共通コンポーネントから API link が navigation prefetch の対象として渡されなくなりました。</p>
+<p>呼び出し側が download ごとに特別な prop を覚える必要がないため、この修正は共通コンポーネントに置くのが適切です。このアプリケーションでは path 自体が境界を示します。ルールを一か所にまとめることで、review もしやすくなります。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-09-exp-05-link-prefetch-side-effects/ja-diagram-2.png" alt="API の通常 anchor と Next.js のページリンクを分離する提案設計"></figure>
+<p><em>提案する設計：API の遷移先には通常の anchor を使い、Next.js Link はページ遷移に限定します。Endpoint の再設計は今後の作業です。</em></p>
+<p><strong>より根本的な問題</strong></p>
+<p>コンポーネントの変更で今回の prefetch 経路は防げますが、endpoint の設計にはリスクが残ります。GET URL は prefetcher、crawler、link preview、retry、scanner、または新しい tab で開いた人から呼ばれる可能性があります。副作用は、そのたびに繰り返され得ます。</p>
+<p>より強い対策として、export の準備と作成済み結果の download を分離する計画が考えられます。明示的な non-GET request で、認可と利用者の意図を確認してから export を作成します。その後、安全な読み取りで準備済みファイルを取得します。この再設計は提案であり、今回完了した作業ではありません。</p>
+<p>Product analytics と transport event を分けることも提案したいです。Request を受けた事実だけでは、人がその名前の操作をした証明になりません。意図が確定した位置で export を記録し、ファイルの生成と配信は別の operational log に残すべきです。</p>
+<p>さらに、本番モードのテストを追加する計画もあります。管理画面を開き、クリックせずに待って export が作成されないことを確認します。その後リンクを一度クリックし、意図した結果が一件だけ生成されることを確認します。このテストも提案であり、実施済みの修正には含まれません。</p>
+<h3>利点と欠点</h3>
+<p><strong>利点</strong></p>
+<ul>
+<li>共通コンポーネントの小さな修正で、それを使うすべての /api/ link を保護できます。</li>
+<li>ページ遷移では Next.js Link の性能上の利点を維持できます。</li>
+<li>Navigation と API access の違いがコード上で明確になります。</li>
+<li>通常の anchor でも、実際のクリック後に browser の標準 download 動作を利用できます。</li>
+</ul>
+<p><strong>欠点</strong></p>
+<ul>
+<li>Endpoint はまだ GET であり、呼ばれると副作用を起こします。</li>
+<li>別の client は利用者のクリックなしに URL を呼べます。</li>
+<li>Path prefix のルールはアプリケーションの URL 規約に依存します。</li>
+<li>開発モードだけでは本番の prefetch behavior を確認できません。</li>
+</ul>
+<p>実務上の教訓は、prefetch が危険だということではありません。Prefetch は navigation のために有用な仕事をしています。GET endpoint は、クリックがなくても呼ばれることを前提にする必要があります。それができない場合、HTTP method と workflow が実際の操作を正しく表していません。</p>
+<h3>まとめ</h3>
+<p>管理画面の Next.js Link により、CSV export が訪問者ごとのバックグラウンド処理になりました。本番の prefetch が GET endpoint を呼び、利用指標をおよそ三倍に増やし、クリックなしで機密性のある顧客データ CSV を生成しました。開発モードでは prefetch しないため、問題が隠れていました。</p>
+<p>私は共通リンクコンポーネントを修正し、/api/ URL では通常の &lt;a&gt; 要素を出力するようにしました。これにより、通常のページでは Next.js Link を維持しながら、確認された prefetch 経路を閉じました。</p>
+<p>より広い原則は単純です。GET は、利用者の意図を表さない機械からも呼ばれるものとして扱います。Prefetcher、crawler、link preview、scanner は Web の通常の一部です。副作用のある処理には、意図を明示できる設計が必要です。</p>
+<h3>今後</h3>
+<p>次は、明示的な作成 request、個別に認可する download、生成ファイルの retention policy を含む export workflow への再設計を計画しています。また、ページ表示、export request、完了した download を同じ event と決めつけずに比較する本番モードのテストと alert も追加したいと考えています。</p>
+<p><strong>タグ</strong></p>
+<p>Next.js, Web Security, Privacy, React, Web Development</p>
+<h3>参考</h3>
+<p><strong>Next.js 公式ドキュメント</strong></p>
+<p>Prefetching: <a href="https://nextjs.org/docs/app/guides/prefetching">https://nextjs.org/docs/app/guides/prefetching</a></p>
+<p><strong>MDN Web Docs</strong></p>
+<p>Safe (HTTP Methods): <a href="https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP">https://developer.mozilla.org/en-US/docs/Glossary/Safe/HTTP</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
