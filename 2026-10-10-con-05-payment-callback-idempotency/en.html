@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Payment Callbacks: Idempotency, Signatures, and Compare-and-Swap</title></head>
+<body>
+<h1>Payment Callbacks: Idempotency, Signatures, and Compare-and-Swap</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/en-cover.png" alt="Payment Callbacks: Idempotency, Signatures, and Compare-and-Swap"></figure>
+<p>In this blog, I will explain how to accept repeated payment callbacks without trusting, losing, or applying the same event twice.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Verify before processing</li>
+<li>Idempotency and event identity</li>
+<li>Compare-and-swap for order state</li>
+<li>Demo flow</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>A payment callback is a message from a payment gateway to my server. It tells the application that something happened outside the current browser session. A payment may have succeeded, failed, expired, or been refunded. This server-to-server message is often the most reliable place to update the order.</p>
+<p>However, a callback is not a command that arrives exactly once. Networks retry. Gateways retry when they do not receive a timely response. A server can finish its database work and crash before sending the response. Two workers can receive the same event at nearly the same time. Delivery can also arrive out of order.</p>
+<p>That means the handler must expect duplicates from the beginning. It must also prove that the sender is trusted and control how an order moves from one state to another. I use three separate ideas for these jobs: signature verification, idempotency, and compare-and-swap.</p>
+<h3>Overview</h3>
+<p>These three ideas solve different problems. A signature answers, “Did this message come from a party that knows the shared secret or private key?” Idempotency answers, “Have I already accepted this logical event?” Compare-and-swap answers, “Is the order still in the state that allows this transition?”</p>
+<p>None can replace the others. A valid signature does not make duplicate delivery impossible. An idempotency key does not prove who sent the request. A state comparison does not detect every replay if the repeated action is valid from the current state.</p>
+<p>I would keep the callback endpoint narrow. It should read the request in the form required by the gateway, verify authenticity, parse a small event envelope, find the internal order, and perform one transactional state change. Email, analytics, fulfillment, and other slow work can follow through durable internal jobs.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/en-diagram-1.png" alt="A proposed payment callback verification flow"></figure>
+<p><em>Proposed design: verify the callback before parsing and applying its business event.</em></p>
+<h3>Verify Before Processing</h3>
+<p><strong>Use the exact signed representation</strong></p>
+<p>Gateways define their own signature schemes. Some sign the raw HTTP body. Others combine selected fields, a timestamp, or request metadata. The handler must follow that contract exactly. If the framework parses JSON and then serializes it again, spaces and field ordering may change. A signature over the rebuilt body can fail even when the message is legitimate.</p>
+<p>I would capture the raw bytes first when the provider signs the body. I would then calculate the expected signature with the configured secret and compare it using a constant-time comparison where the platform provides one. Only after verification would I trust fields such as the order reference, amount, currency, and event type.</p>
+<p>Transport encryption is still necessary, but HTTPS and message signatures answer different questions. HTTPS protects the connection. The signature lets the application authenticate the message according to the gateway’s protocol.</p>
+<p><strong>Reject invalid input safely</strong></p>
+<p>An invalid signature should not reach order logic. Logs should contain enough information to investigate, but they should not store secrets, complete payment credentials, or unnecessary personal data. Error responses should also avoid revealing how the expected signature was calculated.</p>
+<p>Timestamp checks can reduce replay risk when the gateway includes a signed timestamp. The acceptable window and retry behavior must follow the provider’s documentation. A server clock problem can otherwise reject valid events, so time synchronization and observability matter.</p>
+<h3>Idempotency and Event Identity</h3>
+<p>Idempotency means that repeating the same logical operation has the same intended effect as doing it once. For callbacks, the easiest implementation usually starts with a stable event identifier supplied by the gateway. I would store that identifier in a table with a unique constraint.</p>
+<p>The unique constraint is important. A prior “does this event exist?” query followed by an insert has a race. Two workers can both see nothing and both continue. Letting the database arbitrate one unique insert closes that gap.</p>
+<p>The key needs the right scope. If event identifiers are unique only within a merchant account or gateway, the stored key should include that scope. A key that is too broad can suppress unrelated events. A key that is too narrow can let the same event through twice.</p>
+<p>I would store a compact processing record: source, event identifier, order identifier, event type, receipt time, and outcome. The full payload should be retained only when there is a clear operational and privacy reason. Data minimization matters for payment systems.</p>
+<p>A duplicate callback should normally receive a successful response after the system confirms that the original event was already accepted. Returning an error for a harmless duplicate can cause more retries. This response does not mean every downstream task finished; it means the event is safely recorded and will not be double-applied.</p>
+<h3>Compare-and-Swap for Order State</h3>
+<p>Deduplicating the event is not enough because different events can race. A late “payment succeeded” callback could arrive after a refund or cancellation workflow. The application needs an explicit state machine that defines which transitions are legal.</p>
+<p>Compare-and-swap expresses the rule inside the database update. Instead of reading an order as pending and later updating it unconditionally, the statement updates it only where the identifier matches and the current state is still pending. The affected-row count tells the handler whether it won the transition.</p>
+<p>This conditional update removes a dangerous gap between read and write. If another transaction changes the state first, the stale worker updates zero rows. The handler can then inspect the current state and decide whether the event is a duplicate, a legal later transition, or an inconsistency that needs review.</p>
+<p>Money-related side effects must share the same boundary. If the event record says “processed” but the order update rolls back, or the order changes while the event record is lost, retries become difficult to reason about. I would put event claiming and the order transition in one database transaction. External effects should be driven by a durable outbox or job created in that same transaction.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/en-diagram-2.png" alt="A proposed transactional flow for deduplication and conditional order updates"></figure>
+<p><em>Proposed design: claim the event and compare the order state in one transaction, then commit once.</em></p>
+<h3>Demo Flow</h3>
+<p>I would test the design with behavior, not only status codes. First, send one valid callback and confirm that the event and order transition are committed. Then send the identical callback again and confirm that no balance, entitlement, inventory, or notification is applied twice.</p>
+<p>Next, send two copies concurrently. Exactly one transaction should claim the event. I would also test an invalid signature, an unknown order, a mismatched amount or currency, and a valid but late event that is not allowed from the current state.</p>
+<p>Finally, simulate a crash after the database commit but before the HTTP response. The retry should find the stored event and return safely. This test represents a common reason for legitimate duplicate delivery.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>Signature verification keeps unauthenticated requests away from order logic.</li>
+<li>A database uniqueness rule handles concurrent duplicate delivery.</li>
+<li>Conditional updates make state transitions explicit and atomic.</li>
+<li>A stored event record provides evidence for support and reconciliation.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>Every gateway has a different signing and retry contract.</li>
+<li>Event records need retention, privacy, and cleanup decisions.</li>
+<li>Out-of-order events still require a carefully defined state machine.</li>
+<li>Downstream work needs its own idempotency or durable delivery pattern.</li>
+</ul>
+<h3>Conclusion</h3>
+<p>A reliable payment callback handler assumes that delivery is repeated, concurrent, and sometimes out of order. It authenticates the exact message first. It claims a correctly scoped event key under a unique constraint. It changes the order only when the current state permits that transition.</p>
+<p>The central lesson is simple: “received once” is not a safe system property. “Applied once under a verified and legal transition” is the property to design and test.</p>
+<h3>Other</h3>
+<p>Next, I want to build a gateway-independent callback test harness. It would replay captured test fixtures, send concurrent duplicates, reorder events, and simulate a lost HTTP response after commit.</p>
+<p>I also want to document the order state machine next to the code. A small transition table can make review easier than scattered conditional statements and can become the source for negative tests.</p>
+<h3>Reference</h3>
+<p><strong>MDN Web Docs</strong></p>
+<p>Idempotent: <a href="https://developer.mozilla.org/en-US/docs/Glossary/Idempotent">https://developer.mozilla.org/en-US/docs/Glossary/Idempotent</a></p>
+<p><strong>OWASP Cheat Sheet Series</strong></p>
+<p>REST Security Cheat Sheet: <a href="https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html">https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

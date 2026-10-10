@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>決済コールバックの設計：冪等性、署名、Compare-and-Swap</title></head>
+<body>
+<h1>決済コールバックの設計：冪等性、署名、Compare-and-Swap</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/ja-cover.png" alt="決済コールバックの設計：冪等性、署名、Compare-and-Swap"></figure>
+<p>この記事では、繰り返し届く決済コールバックを信頼しすぎず、失わず、同じイベントを二重適用せずに処理する方法を説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul>
+<li>はじめに</li><li>概要</li><li>処理前の検証</li><li>冪等性とイベント識別</li><li>注文状態の Compare-and-Swap</li><li>デモフロー</li><li>利点と欠点</li><li>まとめ</li><li>今後</li><li>参考</li>
+</ul>
+<h3>はじめに</h3>
+<p>決済コールバックは、決済ゲートウェイから私のサーバーへ届くメッセージです。ブラウザーの現在のセッションとは別の場所で、支払いの成功、失敗、期限切れ、返金などが起きたことを伝えます。注文を更新するうえで、このサーバー間通知が最も信頼できる入口になることがあります。</p>
+<p>ただし、コールバックは必ず一度だけ届く命令ではありません。ネットワークもゲートウェイも再試行します。サーバーがデータベース処理を完了した直後、応答を返す前に停止することもあります。同じイベントを二つのワーカーがほぼ同時に受信する場合もあり、到着順が前後する場合もあります。</p>
+<p>そのため、最初から重複を前提に設計する必要があります。同時に、送信元が信頼できることを確認し、注文がどの状態からどの状態へ移れるかも制御します。私はこれらを、署名検証、冪等性、Compare-and-Swap という三つの別々の考え方で整理します。</p>
+<h3>概要</h3>
+<p>三つの仕組みは異なる問題を解きます。署名は「共有秘密または秘密鍵を知る相手から届いたか」を確認します。冪等性は「この論理イベントをすでに受け付けたか」を確認します。Compare-and-Swap は「注文がまだこの遷移を許す状態か」を確認します。</p>
+<p>どれか一つで他を代用することはできません。署名が正しくても重複配送は起きます。冪等キーだけでは送信者を証明できません。状態比較だけでは、現在の状態でも有効な再実行をすべて発見できるとは限りません。</p>
+<p>コールバックの endpoint は小さく保ちたいです。ゲートウェイが要求する形式で request を読み、真正性を検証し、小さな event envelope を解析し、内部の注文を見つけ、一つの transaction で状態を変更します。メール、analytics、fulfillment などの遅い処理は、耐久性のある内部 job へ渡す設計が適しています。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/ja-diagram-1.png" alt="決済コールバックを検証する設計フロー"></figure>
+<p><em>改善案：business event を解析して適用する前に、コールバックの署名を検証します。</em></p>
+<h3>処理前の検証</h3>
+<p><strong>署名対象と同じ表現を使う</strong></p>
+<p>署名方式はゲートウェイごとに異なります。生の HTTP body を署名する方式もあれば、特定の field、timestamp、request metadata を組み合わせる方式もあります。handler はその契約に正確に従う必要があります。framework が JSON を解析してから再び serialize すると、空白や field の順序が変わります。組み直した body で検証すると、正当な通知まで失敗する可能性があります。</p>
+<p>provider が body を署名する場合、私はまず raw bytes を保持します。設定された secret で期待する署名を計算し、platform が提供する constant-time comparison で比較します。注文参照、金額、通貨、event type などを信頼するのは検証後です。</p>
+<p>HTTPS も必要ですが、通信の暗号化と message signature は別の問いに答えます。HTTPS は接続を保護します。署名は、ゲートウェイの protocol に従って message の送信元を確認します。</p>
+<p><strong>無効な入力を安全に拒否する</strong></p>
+<p>署名が無効な request を注文ロジックへ渡してはいけません。調査に必要な情報は log に残しますが、secret、完全な決済 credential、不要な個人情報は保存しません。error response から署名計算の詳細が漏れないようにもします。</p>
+<p>ゲートウェイが署名付き timestamp を含める場合、時刻検査は replay risk を減らせます。許容時間と再試行は provider の documentation に従う必要があります。server clock のずれで正当な event を拒否しないよう、時刻同期と observability も重要です。</p>
+<h3>冪等性とイベント識別</h3>
+<p>冪等性とは、同じ論理操作を繰り返しても、一度だけ実行した場合と同じ意図した効果になる性質です。コールバックでは、ゲートウェイが提供する安定した event identifier を使う方法が分かりやすいです。私はその値を unique constraint 付きの table に保存します。</p>
+<p>unique constraint が重要です。「event が存在するか」を先に検索し、その後 insert するだけでは race が残ります。二つの worker が同時に「存在しない」と判断できます。database に一つの unique insert を裁定させれば、この隙間を閉じられます。</p>
+<p>key の scope も正しく決めます。event ID が merchant account または gateway 内だけで一意なら、その scope も保存キーに含めます。広すぎる key は無関係な event を止め、狭すぎる key は同じ event の二重処理を許します。</p>
+<p>source、event ID、order ID、event type、受信時刻、結果など、簡潔な処理記録を残すとよいでしょう。完全な payload は、運用上の明確な理由と privacy の判断がある場合だけ保持します。決済システムでは data minimization が重要です。</p>
+<p>重複通知について、元の event をすでに安全に受け付けたと確認できたら、通常は成功応答を返します。無害な重複へ error を返すと再試行が増えます。この成功は下流の全処理完了を意味せず、event が安全に記録され二重適用されないことを意味します。</p>
+<h3>注文状態の Compare-and-Swap</h3>
+<p>event の重複排除だけでは不十分です。異なる event 同士が競合するからです。遅れて届いた「支払い成功」が、返金や取消処理の後に到着する場合があります。どの遷移を許すかを明示した state machine が必要です。</p>
+<p>Compare-and-Swap は、この規則を database update の中で表現します。注文を pending と読んだ後で無条件に update するのではなく、ID が一致し、現在の状態がまだ pending の場合だけ更新します。affected row count を見れば、遷移を獲得できたか分かります。</p>
+<p>この条件付き update は read と write の危険な隙間をなくします。別の transaction が先に状態を変えると、古い worker の更新件数はゼロです。handler は現在状態を確認し、重複なのか、後続の正当な遷移なのか、調査すべき不整合なのかを判断できます。</p>
+<p>金銭に関わる side effect は同じ境界に置く必要があります。event record だけが processed になり注文更新が rollback したり、注文だけ変わって event record が失われたりすると、再試行の意味が曖昧になります。event の claim と注文遷移は一つの database transaction に入れます。外部作用は、同じ transaction で作る durable outbox または job から実行する設計が適しています。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/ja-diagram-2.png" alt="重複排除と条件付き注文更新を一つの取引で行う設計"></figure>
+<p><em>改善案：一つの transaction で event を確保して注文状態を比較し、一度だけ commit します。</em></p>
+<h3>デモフロー</h3>
+<p>status code だけでなく、実際の動作を test します。まず正しいコールバックを一件送り、event と注文遷移が commit されたことを確認します。同じ通知を再送し、残高、権利、在庫、通知が二重に適用されないことを確認します。</p>
+<p>次に二つのコピーを同時送信します。一つの transaction だけが event を確保するべきです。無効な署名、不明な注文、金額や通貨の不一致、現在状態からは許されない遅延 event も test します。</p>
+<p>最後に database commit 後、HTTP response 前の停止を再現します。再試行は保存済み event を見つけ、安全に応答できるべきです。これは正当な重複配送が起きる代表的な理由です。</p>
+<h3>利点と欠点</h3>
+<p><strong>利点</strong></p>
+<ul><li>署名検証によって未認証 request を注文ロジックから遠ざけられます。</li><li>database の一意性制約が同時重複配送を処理します。</li><li>条件付き update により状態遷移が明示的かつ atomic になります。</li><li>event 記録が support と reconciliation の証拠になります。</li></ul>
+<p><strong>欠点</strong></p>
+<ul><li>署名と再試行の契約はゲートウェイごとに異なります。</li><li>event record には保存期間、privacy、cleanup の判断が必要です。</li><li>順序が前後する event には慎重な state machine が必要です。</li><li>下流処理にも独自の冪等性または durable delivery が必要です。</li></ul>
+<h3>まとめ</h3>
+<p>信頼できる決済 callback handler は、配送が重複し、同時に届き、ときには順序も前後すると考えます。最初に正確な message を認証し、適切な scope の event key を unique constraint の下で確保し、現在状態が許す場合だけ注文を変更します。</p>
+<p>中心となる教訓は単純です。「一度だけ受信する」は安全な system property ではありません。「検証済みで正当な遷移として一度だけ適用する」ことを設計し、test する必要があります。</p>
+<h3>今後</h3>
+<p>次に、gateway に依存しない callback test harness を作りたいです。test fixture の replay、同時重複送信、event 順序の変更、commit 後に HTTP response が失われる状況を再現します。</p>
+<p>注文の state machine も code の隣に文書化したいです。小さな遷移表は、散在した条件文より review しやすく、negative test の元にもなります。</p>
+<h3>参考</h3>
+<p><strong>MDN Web Docs</strong></p>
+<p>Idempotent: <a href="https://developer.mozilla.org/en-US/docs/Glossary/Idempotent">https://developer.mozilla.org/en-US/docs/Glossary/Idempotent</a></p>
+<p><strong>OWASP Cheat Sheet Series</strong></p>
+<p>REST Security Cheat Sheet: <a href="https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html">https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body>
+</html>

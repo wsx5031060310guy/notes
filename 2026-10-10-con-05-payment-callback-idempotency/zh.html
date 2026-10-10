@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>金流回呼設計：冪等性、簽章與 Compare-and-Swap</title></head>
+<body>
+<h1>金流回呼設計：冪等性、簽章與 Compare-and-Swap</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/zh-cover.png" alt="金流回呼設計：冪等性、簽章與 Compare-and-Swap"></figure>
+<p>在這篇文章中，我會說明如何接收重複送達的金流回呼，不盲目信任、不漏掉事件，也不把同一筆事件套用兩次。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li><li>概觀</li><li>處理前先驗證</li><li>冪等性與事件識別</li><li>以 Compare-and-Swap 更新訂單狀態</li><li>示範流程</li><li>優點與缺點</li><li>結論</li><li>其他</li><li>參考</li>
+</ul>
+<h3>前言</h3>
+<p>金流回呼是金流閘道傳給我方伺服器的訊息。它告訴應用程式，使用者目前的瀏覽器工作階段之外發生了某件事，例如付款成功、失敗、逾期或退款。更新訂單時，這種伺服器對伺服器的通知通常是重要依據。</p>
+<p>然而，回呼不是保證只送達一次的命令。網路會重試，金流閘道收不到及時回應時也會重試。伺服器可能已完成資料庫工作，卻在送出回應前停止。兩個 worker 可能在幾乎相同的時間收到同一事件，事件也可能不按原始順序抵達。</p>
+<p>因此，設計一開始就必須預期重複。系統也要證明傳送者可信，並控制訂單可以從哪一個狀態移到哪一個狀態。我會把這些責任拆成三個概念：簽章驗證、冪等性與 Compare-and-Swap。</p>
+<h3>概觀</h3>
+<p>三個概念解決不同問題。簽章回答：「這個訊息是否來自知道共享密鑰或持有私鑰的一方？」冪等性回答：「我是否已經接收過這個邏輯事件？」Compare-and-Swap 回答：「訂單是否仍處於允許這次轉換的狀態？」</p>
+<p>三者不能互相取代。簽章有效不代表不會重複送達。冪等鍵不能證明 request 由誰送出。狀態比較也不一定能識別所有重播，因為某個動作在目前狀態下可能仍然有效。</p>
+<p>我會讓回呼 endpoint 保持精簡。它依照金流閘道要求的格式讀取 request、驗證真實性、解析小型 event envelope、找到內部訂單，並完成一次具交易性的狀態變更。電子郵件、analytics、出貨及其他較慢工作，可以交給具耐久性的內部 job。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/zh-diagram-1.png" alt="金流回呼簽章驗證的建議流程"></figure>
+<p><em>建議的設計：先驗證回呼，再解析並套用商業事件。</em></p>
+<h3>處理前先驗證</h3>
+<p><strong>使用簽章所針對的原始表示</strong></p>
+<p>每家金流閘道的簽章方式都不同。有些針對原始 HTTP body 簽章，有些會組合特定欄位、timestamp 或 request metadata。handler 必須準確遵守該契約。若 framework 先解析 JSON，再重新 serialize，空白與欄位順序可能改變。用重建的 body 驗證簽章，即使訊息合法也可能失敗。</p>
+<p>當 provider 對 body 簽章時，我會先保留 raw bytes，再以設定的 secret 計算預期簽章，並在平台提供相關功能時，使用 constant-time comparison 比較。只有驗證完成後，我才會信任訂單參考值、金額、幣別與 event type 等欄位。</p>
+<p>傳輸加密仍然必要，但 HTTPS 和訊息簽章回答不同問題。HTTPS 保護連線，簽章則讓應用程式依照金流閘道的 protocol 驗證訊息來源。</p>
+<p><strong>安全地拒絕無效輸入</strong></p>
+<p>簽章無效的 request 不應進入訂單邏輯。log 要有足夠資料供調查，但不應儲存 secret、完整付款憑證或不必要的個人資料。錯誤回應也不該透露預期簽章如何計算。</p>
+<p>如果金流閘道加入已簽章的 timestamp，時效檢查可以降低 replay 風險。允許的時間範圍與重試行為必須依 provider 文件設定。伺服器時鐘若有問題，也可能拒絕合法事件，因此時間同步與 observability 同樣重要。</p>
+<h3>冪等性與事件識別</h3>
+<p>冪等性表示重複執行同一個邏輯操作，預期效果仍與執行一次相同。對回呼而言，最直接的做法通常是使用金流閘道提供的穩定 event identifier。我會把它寫入具有 unique constraint 的資料表。</p>
+<p>unique constraint 很重要。若先查詢「這個事件是否存在」，再執行 insert，中間仍有 race。兩個 worker 都可能同時看到不存在，然後一起往下執行。讓資料庫以唯一寫入做裁定，才能關閉這個缺口。</p>
+<p>key 的 scope 必須正確。若 event ID 只在 merchant account 或單一 gateway 中唯一，儲存的 key 就要包含該範圍。過度寬廣的 key 會擋掉無關事件，太窄的 key 則可能放行同一事件兩次。</p>
+<p>我會保留精簡的處理紀錄，包括來源、event ID、order ID、event type、接收時間與結果。只有在有明確營運與隱私理由時，才保留完整 payload。金流系統需要重視 data minimization。</p>
+<p>對重複回呼而言，只要確認原事件已被安全接收，通常應回傳成功。對無害的重複事件回傳錯誤，可能引發更多重試。這個成功不代表所有下游工作都已完成，而是代表事件已被安全記錄，而且不會重複套用。</p>
+<h3>以 Compare-and-Swap 更新訂單狀態</h3>
+<p>僅對 event 去重還不夠，因為不同事件也可能競爭。延遲的「付款成功」回呼，可能在退款或取消流程之後才到達。應用程式需要明確的 state machine，定義哪些狀態轉換合法。</p>
+<p>Compare-and-Swap 把規則放進資料庫 update。不要先讀到訂單是 pending，稍後再無條件更新；而是只有在訂單 ID 相符，而且目前狀態仍是 pending 時才更新。affected row count 會告訴 handler 是否成功取得這次轉換。</p>
+<p>條件式 update 消除了 read 與 write 之間的危險空隙。若另一個 transaction 先改變狀態，拿著舊資料的 worker 會更新零筆。handler 接著可查看目前狀態，判斷它是重複事件、合法的後續轉換，或需要人工檢查的不一致。</p>
+<p>與金錢相關的 side effect 必須共用清楚的邊界。如果 event record 顯示 processed，但訂單更新 rollback；或訂單已變更，event record 卻遺失，重試行為就很難推理。我會把 event claim 與訂單轉換放在同一個 database transaction。外部作用應由同一 transaction 建立的 durable outbox 或 job 驅動。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-10-con-05-payment-callback-idempotency/zh-diagram-2.png" alt="在單一交易內去重並條件式更新訂單的建議流程"></figure>
+<p><em>建議的設計：在同一個 transaction 內取得事件並比較訂單狀態，最後只 commit 一次。</em></p>
+<h3>示範流程</h3>
+<p>我會驗證實際行為，不只看 status code。先送出一筆有效回呼，確認 event 與訂單轉換都已 commit。接著再次送出完全相同的回呼，確認餘額、權益、庫存或通知沒有套用兩次。</p>
+<p>下一步同時送出兩份副本。應該只有一個 transaction 能取得 event。我也會測試無效簽章、未知訂單、金額或幣別不符，以及有效但太晚抵達、目前狀態不允許的 event。</p>
+<p>最後，模擬資料庫 commit 後、HTTP response 送出前的當機。重試應能找到已儲存的 event，並安全回應。這正是合法重複送達的常見原因。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul><li>簽章驗證讓未通過認證的 request 遠離訂單邏輯。</li><li>資料庫唯一性規則可以處理同時發生的重複送達。</li><li>條件式 update 讓狀態轉換明確且具原子性。</li><li>保留 event 記錄可為客服與對帳提供證據。</li></ul>
+<p><strong>缺點</strong></p>
+<ul><li>每家金流閘道的簽章與重試契約不同。</li><li>event record 需要決定保留期限、隱私與清理方式。</li><li>順序錯亂的事件仍需要定義嚴謹的 state machine。</li><li>下游工作也需要自己的冪等性或 durable delivery 設計。</li></ul>
+<h3>結論</h3>
+<p>可靠的金流回呼 handler 會假設事件可能重複、同時抵達，偶爾還會順序顛倒。它先驗證精確的原始訊息，再透過 unique constraint 取得範圍正確的 event key，最後只在目前狀態允許時變更訂單。</p>
+<p>核心觀念很簡單：「只收到一次」不是可靠的系統特性。真正需要設計與測試的是：「經過驗證，而且屬於合法狀態轉換的事件，只套用一次。」</p>
+<h3>其他</h3>
+<p>下一步，我想建立不綁定特定 gateway 的 callback test harness。它可以重播測試 fixture、同時送出重複事件、交換事件順序，並模擬 commit 後遺失 HTTP response 的情況。</p>
+<p>我也想把訂單 state machine 寫在程式旁邊。簡短的轉換表比散落各處的條件判斷更容易 review，也可以成為 negative test 的來源。</p>
+<h3>參考</h3>
+<p><strong>MDN Web Docs</strong></p>
+<p>Idempotent: <a href="https://developer.mozilla.org/en-US/docs/Glossary/Idempotent">https://developer.mozilla.org/en-US/docs/Glossary/Idempotent</a></p>
+<p><strong>OWASP Cheat Sheet Series</strong></p>
+<p>REST Security Cheat Sheet: <a href="https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html">https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body>
+</html>
