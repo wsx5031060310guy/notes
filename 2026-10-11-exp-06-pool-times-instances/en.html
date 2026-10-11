@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>A Passive Security Scan Took My Production Database Down</title></head>
+<body>
+<h1>A Passive Security Scan Took My Production Database Down</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-11-exp-06-pool-times-instances/en-cover.png" alt="A Passive Security Scan Took My Production Database Down"></figure>
+<p>A quiet security check exposed a capacity mistake that normal traffic had not revealed.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>How the failure happened</li>
+<li>Discussion</li>
+<li>The fix</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>In this blog, I will describe how a passive vulnerability scan took down a production database. The scanner did not exploit a bug. It did not send extreme traffic. It only created enough parallel requests to expose a connection-pool configuration that could not survive autoscaling.</p>
+<p>The application ran on a serverless container platform. The platform could start several application instances when request volume increased. Behind those instances was a small managed PostgreSQL database with about 25 usable connection slots.</p>
+<p>Each application instance opened its own database connection pool. One pool looked reasonable when I viewed it alone. The problem appeared only after I multiplied that pool by the maximum number of instances. The possible total was larger than the database could accept.</p>
+<p>An OWASP ZAP baseline scan supplied the trigger. It generated enough concurrent work for the platform to scale out. More application instances meant more pools. The pools consumed the available database connections, and the site went down.</p>
+<h3>Overview</h3>
+<p>The important relationship is simple:</p>
+<blockquote>pool size per instance × active instances must fit inside the database connection budget</blockquote>
+<p>This sounds obvious after the incident. It was easy to miss before it. A serverless container changes the unit of capacity. The setting in the application is not the total pool size. It is the pool size for one instance.</p>
+<p>If one instance starts, the database sees one pool. If several instances start, the database can see several independent pools. The database does not know that these pools belong to one application. It only sees clients asking for connections.</p>
+<p>The managed database had about 25 usable slots. Those slots also needed to cover practical overhead. The application could not safely treat every theoretical slot as available for ordinary requests. Capacity needed to be planned from the database backward, not from one container outward.</p>
+<h3>How the Failure Happened</h3>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-11-exp-06-pool-times-instances/en-diagram-1.png" alt="Parallel scan requests caused more application instances and exhausted database connections"></figure>
+<p><em>The failure path: parallel scan requests caused the platform to add instances, multiplying connection pools until the database slots were exhausted.</em></p>
+<p><strong>Step 1: A passive scan created parallel requests</strong></p>
+<p>The OWASP ZAP baseline scan behaved like modest real traffic. It did not need to attack the database directly. It requested the web application through the normal path.</p>
+<p><strong>Step 2: The platform scaled the application out</strong></p>
+<p>The serverless container platform responded as designed. It started more instances so the application could handle concurrent requests. From the platform's point of view, scaling out was healthy behavior.</p>
+<p><strong>Step 3: Every instance opened a pool</strong></p>
+<p>Each new instance had the same connection-pool configuration. The pool limit was local to that process. It was not coordinated with the pools in the other instances.</p>
+<p><strong>Step 4: The combined demand crossed the database limit</strong></p>
+<p>The database had about 25 usable connection slots. Once the combined pools competed for more than that budget, requests could no longer get database connections. The site became unavailable.</p>
+<p>This sequence matters because each component acted normally in isolation. The scanner made ordinary web requests. The platform added capacity. The application opened its configured pool. PostgreSQL enforced its connection limit. The outage came from the interaction between those correct local behaviors.</p>
+<h3>Discussion</h3>
+<p><strong>A pool is not free capacity</strong></p>
+<p>A connection pool improves reuse. It does not create database capacity. A large pool can even reserve more potential demand than the database can serve when many application instances exist.</p>
+<p>I now think of the pool as a budget request. Every instance asks for up to a certain number of database connections. Autoscaling can repeat that request. The database must be able to satisfy the sum, with room left for operations and recovery.</p>
+<p><strong>Autoscaling moves the multiplication sign</strong></p>
+<p>On one long-running server, it is natural to compare one pool with one database. On a scaling platform, the safer question is different: what is the maximum combined demand if several instances are alive at the same time?</p>
+<p>This is not only a traffic problem. A deployment, cold starts, a scan, or a brief burst can increase the number of active instances. If connection planning assumes the usual instance count, the unusual moment becomes the outage.</p>
+<p><strong>The scanner was a capacity test by accident</strong></p>
+<p>The scan did not attack anything. It exposed a limit that modest real traffic could also reach. That changed how I interpreted the incident. Blocking the scanner would have hidden the configuration error. It would not have corrected the capacity model.</p>
+<p>A useful security check can exercise more than security controls. It can reveal queueing, timeout, concurrency, and resource-budget problems. That is valuable, but it also means a production scan needs operational care.</p>
+<h3>The Fix</h3>
+<p>I changed two things that were directly related to the failure.</p>
+<p>First, I recalculated the pool against the database limit and the platform's possible instance count. I reduced the pool to 6 connections per instance. The rule was that pool size per instance multiplied by maximum instances had to fit inside the database connection limit.</p>
+<p>Second, I added a 10-second connection timeout. Without a bounded wait, requests could hang while waiting for a connection that was not becoming available. The timeout made requests fail sooner instead of consuming time indefinitely.</p>
+<p>These changes addressed different parts of the problem. The smaller pool reduced the maximum combined demand. The timeout bounded the waiting behavior when a connection still could not be obtained.</p>
+<p>I did not treat the successful scan or a healthy status code as enough evidence by itself. The lesson from the incident was about resource math. Verification needs to consider the database connection budget and the number of application instances, not only whether one request completed.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>The capacity rule becomes explicit and reviewable.</li>
+<li>A smaller per-instance pool prevents autoscaling from multiplying demand beyond the database limit.</li>
+<li>A connection timeout limits how long requests wait when the database is saturated.</li>
+<li>The same calculation can be reviewed when the instance limit or database plan changes.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>A smaller pool can limit concurrency inside one instance.</li>
+<li>A short timeout can turn slow recovery into visible request failures.</li>
+<li>The correct values depend on the database budget and the platform's scaling configuration.</li>
+<li>The calculation can become stale when either side changes.</li>
+</ul>
+<p>The drawbacks do not invalidate the fix. They show why connection settings should be treated as system-level capacity controls, not copied as isolated application defaults.</p>
+<h3>Conclusion</h3>
+<p>The production outage was caused by multiplication. A pool that looked safe for one instance became unsafe when the platform created several instances. A passive scan supplied enough parallel work to reveal the mismatch.</p>
+<p>The durable lesson is to include autoscaling in capacity math. Start with the database's usable connection budget. Reserve practical headroom. Then divide the remaining budget across the maximum number of application instances. Add bounded connection waits so saturation fails clearly instead of hanging.</p>
+<p>The scanner was not the enemy. It behaved like modest real traffic. It showed that the application and database had incompatible assumptions before a larger user event did.</p>
+<h3>Other</h3>
+<p>I want to make this calculation easier to revisit. A better design would document the database connection budget beside the application pool and instance limits. That would make a change on either side visible during review.</p>
+<p>I also want to add monitoring around connection usage, instance count, connection wait time, and timeouts. These are plans, not features that existed during this incident. The goal would be to see the multiplication happen before users see an outage.</p>
+<p>Another useful next step would be a controlled load test in a safe environment. It should increase concurrency gradually and confirm that the application stays within the planned database budget. The test should measure the resource that failed, not only the final HTTP result.</p>
+<h3>Reference</h3>
+<p><strong>PostgreSQL</strong></p>
+<p>Connections and Authentication: <a href="https://www.postgresql.org/docs/current/runtime-config-connection.html">https://www.postgresql.org/docs/current/runtime-config-connection.html</a></p>
+<p><strong>OWASP ZAP</strong></p>
+<p>ZAP Baseline Scan: <a href="https://www.zaproxy.org/docs/docker/baseline-scan/">https://www.zaproxy.org/docs/docker/baseline-scan/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
