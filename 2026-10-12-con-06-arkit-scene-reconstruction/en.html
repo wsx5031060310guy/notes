@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Revisiting ARKit: How LiDAR Scene Reconstruction Changes Remote Instructions</title></head>
+<body>
+<h1>Revisiting ARKit: How LiDAR Scene Reconstruction Changes Remote Instructions</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-12-con-06-arkit-scene-reconstruction/en-cover.png" alt="Revisiting ARKit: How LiDAR Scene Reconstruction Changes Remote Instructions"></figure>
+<p>In this blog, I will revisit remote AR instructions and explain why a scene mesh and depth can make annotations easier to place in the physical world.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>ARWorldMap and shared state</li>
+<li>Scene reconstruction and depth</li>
+<li>A remote instruction flow</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>I wrote about AR remote instructions before. The basic problem still interests me. A remote expert needs to point at something in another person's space. The local user must see that instruction in the right place, not floating beside the target or attached to the screen.</p>
+<p>ARKit already gives an app motion tracking, world tracking, scene understanding, and anchors. An anchor records a position and orientation in world space. This is enough to place virtual content. The difficult part is making that placement meaningful, stable, and easy for another person to understand.</p>
+<p>My earlier approach used ARWorldMap and a real-time database. ARWorldMap provided a shared spatial reference. The database carried instruction data between participants. That separation is still useful: spatial alignment and application state are different problems. However, a shared coordinate system does not describe every physical surface around an annotation.</p>
+<p>LiDAR scene reconstruction changes that part of the design. ARKit can provide a mesh of the observed environment, while scene depth provides distance information for camera pixels. The app can reason about walls, tables, machines, and other geometry instead of treating the room as empty coordinate space.</p>
+<h3>Overview</h3>
+<p>There are three layers in a remote instruction system. The first is tracking. Each device needs to know its pose in the environment. The second is shared state. Both sides need the same instruction identifier, position, orientation, text, and lifecycle. The third is physical context. The instruction should relate to a surface or object that the local user can recognize.</p>
+<p>ARWorldMap helps with the first layer across sessions or devices. It stores ARKit's spatial mapping state and anchors. A receiving device can use the map as an initial world map and attempt to relocalize in the same environment. Apple also notes that both devices need a useful view of the same place for reliable relocalization.</p>
+<p>A real-time database can handle the second layer. It does not align a room by itself. It only synchronizes records. An app still needs to decide which participant creates an anchor, how updates are ordered, and what happens when tracking is limited.</p>
+<p>Scene reconstruction adds information for the third layer. A mesh represents reconstructed surfaces as geometry. Depth gives a per-frame estimate of how far visible points are from the camera. These are related, but they are not interchangeable. The mesh is useful for persistent spatial reasoning. Depth is useful for a current camera view and for checking what lies in front of or behind a virtual item.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-12-con-06-arkit-scene-reconstruction/en-diagram-1.png" alt="Conceptual flow from room scanning to a shared AR instruction"></figure>
+<p><em>Conceptual workflow: scan the room, choose a surface, save an anchor, share the instruction, and relocalize on the receiving device.</em></p>
+<h3>ARWorldMap and shared state</h3>
+<p>ARWorldMap is a snapshot of the spatial information ARKit uses to locate a device in a physical environment. It also includes anchors associated with the session. An app can serialize the map, save it, or send it to another nearby device. The receiving session starts with that map and tries to reconcile it with the current camera view.</p>
+<p>This creates a shared frame of reference. It does not remove the need for application data. An instruction may have text, an author, a status, or a link to another step. Those fields belong in the app's data model. I prefer to keep the anchor identifier in that record and let the spatial system own the transform.</p>
+<p>Relocalization also needs an honest user interface. If the device has not matched the saved environment yet, the app should not pretend that an annotation is trustworthy. A simple state such as scanning, relocalizing, aligned, or limited is more useful than showing content at a doubtful pose.</p>
+<p>World maps can be expensive to move and process compared with small instruction events. Apple's multiuser example sends a world map to establish the shared frame, then sends smaller anchor updates for ongoing actions. That distinction fits remote instructions well. Establish context once, then exchange only what changed.</p>
+<h3>Scene reconstruction and depth</h3>
+<p>A point in world space tells the renderer where to draw. A surface tells the app what that point means. When ARKit reconstructs a mesh, an instruction can be attached to a nearby triangle or oriented from a surface normal. A marker on a wall can face outward. A label on a tabletop can follow the table rather than an arbitrary camera ray.</p>
+<p>Depth helps during placement. The app can compare the user's tap or the expert's projected pointer with observed distance. It can also support occlusion, so a virtual arrow can disappear behind real geometry instead of always drawing on top. This small visual rule makes the instruction easier to read because it respects the shape of the room.</p>
+<p>Neither signal is perfect. The mesh changes as ARKit observes more of the environment. Thin, reflective, moving, or poorly observed objects may not produce geometry that is suitable for precise instructions. Depth also varies with the current view. I would treat both as evidence, not as a guaranteed model of the world.</p>
+<p>The annotation model should therefore keep a stable anchor plus optional surface context. The app can remember which mesh region supported the placement, but it should tolerate that mesh being updated. If the supporting surface cannot be found, the app can ask the user to rescan instead of silently snapping the marker somewhere else.</p>
+<h3>A remote instruction flow</h3>
+<p>First, the local user scans the relevant area. The app watches tracking and mapping state. It should wait for enough spatial information before offering a persistent placement.</p>
+<p>Next, one participant selects a target. A ray from the screen enters the scene. A mesh intersection provides a position and surface orientation. The app creates an anchor and stores the instruction record under its own identifier.</p>
+<p>Then the system shares two different things. It shares enough world data for the other device to establish the same frame of reference, and it shares the smaller instruction record for live updates. The record can refer to the anchor without duplicating all spatial state in every message.</p>
+<p>Finally, the receiving side relocalizes. Only after alignment should it present the annotation as placed. If alignment becomes limited, the interface should show uncertainty. Remote assistance is about communication, so a visible "not aligned" state is better than a confident arrow in the wrong place.</p>
+<h3>Benefits</h3>
+<p><strong>Placement has physical meaning</strong></p>
+<p>A mesh intersection gives the annotation a surface, not only a coordinate. This helps with orientation and makes instructions easier to interpret.</p>
+<p><strong>Occlusion can improve readability</strong></p>
+<p>Depth and reconstructed geometry let the renderer place real surfaces in front of virtual content when appropriate. The result can feel less like a sticker on the camera feed.</p>
+<p><strong>The data model stays separated</strong></p>
+<p>ARKit can manage spatial tracking while the application manages instruction state. This makes it clearer which data needs frequent synchronization.</p>
+<h3>Drawbacks</h3>
+<p><strong>Hardware support matters</strong></p>
+<p>LiDAR features depend on compatible hardware. A production design needs a fallback path for devices that provide world tracking but not the same depth or reconstruction data.</p>
+<p><strong>A mesh is an estimate</strong></p>
+<p>Reconstructed surfaces are not engineering measurements. The app should not use them as proof that a hazardous action is safe or that a component is identified correctly.</p>
+<p><strong>Relocalization remains a user task</strong></p>
+<p>The receiving device still needs to see enough of the same environment. Good prompts and clear tracking states remain part of the feature, even when more geometry is available.</p>
+<h3>Conclusion</h3>
+<p>LiDAR does not replace ARWorldMap or shared application state. It fills a different gap. ARWorldMap helps devices agree on a coordinate system. A database helps participants agree on the instruction record. Scene reconstruction and depth help the app connect that instruction to visible physical geometry.</p>
+<p>For remote instructions, this is a useful shift. The question is no longer only "where is the anchor?" It becomes "which surface supports it, how confident is that placement, and what should the user see when confidence drops?" Those questions lead to a more honest interface.</p>
+<h3>Other</h3>
+<p>I want to build a small comparison prototype next. One mode would place instructions with a basic world-space hit test. The other would retain mesh surface context and use depth for occlusion. I would compare placement recovery after relocalization and record the cases where the mesh is too uncertain to use.</p>
+<p>I also want to design a non-LiDAR fallback. The same instruction format should work when only plane detection or a manual placement flow is available. The interface should state which placement method it used instead of hiding the difference.</p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+<h3>Reference</h3>
+<p><strong>Apple Developer Documentation</strong></p>
+<p>ARKit: <a href="https://developer.apple.com/documentation/arkit">https://developer.apple.com/documentation/arkit</a></p>
+<p>ARWorldMap: <a href="https://developer.apple.com/documentation/arkit/arworldmap">https://developer.apple.com/documentation/arkit/arworldmap</a></p>
+<p>Displaying a point cloud using scene depth: <a href="https://developer.apple.com/documentation/arkit/displaying-a-point-cloud-using-scene-depth">https://developer.apple.com/documentation/arkit/displaying-a-point-cloud-using-scene-depth</a></p>
+</body>
+</html>

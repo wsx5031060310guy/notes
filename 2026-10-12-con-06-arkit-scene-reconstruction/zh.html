@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>重新看 ARKit：LiDAR 場景重建如何改變遠端指示</title></head>
+<body>
+<h1>重新看 ARKit：LiDAR 場景重建如何改變遠端指示</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-12-con-06-arkit-scene-reconstruction/zh-cover.png" alt="重新看 ARKit：LiDAR 場景重建如何改變遠端指示"></figure>
+<p>這篇文章會重新檢視 AR 遠端指示，說明場景網格與深度資訊如何讓標註更容易放在真實空間的正確位置。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>前言</li><li>概觀</li><li>ARWorldMap 與共享狀態</li><li>場景重建與深度</li><li>遠端指示流程</li><li>優點</li><li>缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>前言</h3>
+<p>我以前寫過 AR 遠端指示，現在仍對這個基本問題很有興趣。遠端專家需要指出另一個人空間裡的物件。現場使用者看到的指示必須落在正確位置，而不是飄在目標旁邊，或像貼紙一樣固定在螢幕上。</p>
+<p>ARKit 已經提供 motion tracking、world tracking、scene understanding 與 anchor。Anchor 記錄虛擬內容在世界座標中的位置與方向。這些能力足以把內容畫出來，但要讓位置有意義、保持穩定，而且讓另一個人容易理解，仍然不簡單。</p>
+<p>我較早嘗試的方法使用 ARWorldMap 與即時資料庫。ARWorldMap 提供共享的空間參考，資料庫則在參與者之間傳遞指示資料。這項分工現在仍然合理，因為空間對齊與應用程式狀態是兩個不同問題。不過，共享座標系本身不會描述標註周圍的每一個實體表面。</p>
+<p>LiDAR 場景重建改變的是這個部分。ARKit 可以提供已觀測環境的網格，scene depth 則提供相機畫面中各點的距離資訊。應用程式不必再把房間視為空白的座標空間，而能考慮牆面、桌面、機器與其他幾何形狀。</p>
+<h3>概觀</h3>
+<p>遠端指示系統可以分成三層。第一層是追蹤，每一台裝置都要知道自己在環境中的位置與姿態。第二層是共享狀態，雙方需要取得相同的指示 ID、位置、方向、文字與生命週期。第三層是實體脈絡，指示應該對應到現場使用者能辨認的表面或物件。</p>
+<p>ARWorldMap 能協助裝置或 session 之間的第一層。它保存 ARKit 的空間對應狀態與 anchors。接收端可以把它當作 initial world map，嘗試在相同環境中重新定位。Apple 的說明也指出，要可靠地重新定位，兩台裝置需要看到同一個地點的有效畫面。</p>
+<p>即時資料庫可以處理第二層，但資料庫不會自行對齊房間，只會同步紀錄。應用程式仍要決定哪一方建立 anchor、如何處理更新順序，以及追蹤狀態變成 limited 時要怎麼處理。</p>
+<p>場景重建替第三層加入資訊。網格把重建後的表面表示成幾何形狀。深度則依照目前的相機畫面，估計畫面中可見點與相機的距離。兩者有關，但不能互相取代。網格適合持續的空間判斷；深度適合目前視角，以及檢查虛擬內容前後有哪些東西。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-12-con-06-arkit-scene-reconstruction/zh-diagram-1.png" alt="從掃描空間到共享 AR 指示的概念流程"></figure>
+<p><em>概念流程：掃描空間、選擇表面、儲存 anchor、共享指示，再由接收端重新定位。</em></p>
+<h3>ARWorldMap 與共享狀態</h3>
+<p>ARWorldMap 是 ARKit 用來判斷裝置在實體環境中位置的空間資訊快照，也包含與 session 關聯的 anchors。應用程式可以序列化這份 map，將它儲存下來，或傳送給附近的另一台裝置。接收端利用這份 map 啟動 session，再嘗試讓它與目前的相機畫面相符。</p>
+<p>這樣可以建立共享的參考座標，但不會取代應用程式資料。指示可能包含文字、建立者、狀態，或下一個步驟的連結，這些欄位應該放在應用程式的資料模型。我偏好在紀錄中保存 anchor ID，讓空間系統負責 transform。</p>
+<p>重新定位也需要誠實的使用者介面。如果裝置還沒對上先前保存的環境，應用程式就不該假裝標註位置可以信任。顯示 scanning、relocalizing、aligned 或 limited 這類簡單狀態，比在可疑姿態上直接顯示內容更實用。</p>
+<p>和小型指示事件相比，world map 的傳輸與處理成本較高。Apple 的 multiuser 範例先傳送 world map 來建立共享參考，之後持續的操作只傳較小的 anchor 更新。這也適合遠端指示：先建立一次環境脈絡，再交換有變動的資料。</p>
+<h3>場景重建與深度</h3>
+<p>世界座標中的一個點只告訴 renderer 要畫在哪裡。表面則告訴應用程式那個點代表什麼。ARKit 重建網格後，指示可以依附在附近的三角面，或根據表面法向量決定方向。牆上的標記可以朝外，桌面上的標籤也能沿著桌面，而不是沿著任意的相機射線。</p>
+<p>深度資訊可以協助放置。應用程式能把使用者點擊或專家指標投影的位置，與觀測到的距離比較。它也能支援 occlusion，讓虛擬箭頭在真實幾何形狀後方被遮住，而不是永遠畫在最上層。這個小規則尊重空間形狀，能讓指示更容易閱讀。</p>
+<p>這兩種訊號都不完美。ARKit 觀測到更多環境資訊時，網格會繼續改變。太薄、會反光、正在移動，或沒有被充分觀測的物件，可能無法產生適合精準指示的幾何形狀。深度也會隨目前視角改變。我會把兩者視為判斷證據，不會當成真實世界的保證模型。</p>
+<p>因此，標註模型應該保留穩定的 anchor，並選擇性保存表面脈絡。應用程式可以記住哪個網格區域支撐這次放置，但也要容許網格更新。如果找不到原本的支撐面，應該請使用者重新掃描，而不是默默把標記吸附到另一個位置。</p>
+<h3>遠端指示流程</h3>
+<p>第一步是由現場使用者掃描相關區域。應用程式觀察 tracking 與 mapping 狀態，取得足夠的空間資訊後，才允許建立持久的位置。</p>
+<p>接著由其中一位參與者選擇目標。系統從螢幕發出一條射線，利用它與網格的交點取得位置與表面方向。應用程式建立 anchor，再以自己的 ID 儲存指示紀錄。</p>
+<p>系統接下來共享兩種不同資料。一種是讓另一台裝置建立相同參考座標所需的 world data；另一種是供即時更新使用、較小的指示紀錄。紀錄可以引用 anchor，不必在每一則訊息裡重複所有空間狀態。</p>
+<p>最後由接收端重新定位。只有完成對齊後，才把標註顯示為已放置。如果對齊狀態變成 limited，介面應該顯示不確定性。遠端協助的核心是溝通，所以清楚顯示「尚未對齊」，比把箭頭自信地放在錯誤位置更好。</p>
+<h3>優點</h3>
+<p><strong>放置位置具有實體意義</strong></p>
+<p>網格交點除了座標之外，也提供表面資訊。這有助於決定方向，並讓指示更容易理解。</p>
+<p><strong>Occlusion 能改善可讀性</strong></p>
+<p>深度與重建幾何形狀可以讓真實表面在適當時遮住虛擬內容，減少它看起來像貼在相機畫面上的感覺。</p>
+<p><strong>資料模型可以維持分工</strong></p>
+<p>ARKit 負責空間追蹤，應用程式負責指示狀態。哪些資料需要頻繁同步會變得更清楚。</p>
+<h3>缺點</h3>
+<p><strong>硬體支援會影響功能</strong></p>
+<p>LiDAR 功能依賴相容硬體。正式設計需要替沒有相同深度或重建資料的裝置準備替代流程。</p>
+<p><strong>網格只是估計</strong></p>
+<p>重建表面不是工程量測結果。應用程式不能用它證明危險操作是安全的，也不能用它保證某個零件已被正確識別。</p>
+<p><strong>重新定位仍需要使用者配合</strong></p>
+<p>接收端仍要看到足夠的相同環境。即使幾何資訊增加，良好的引導與清楚的 tracking state 仍是功能的一部分。</p>
+<h3>結論</h3>
+<p>LiDAR 不會取代 ARWorldMap 或共享的應用程式狀態，而是補上不同的缺口。ARWorldMap 幫助裝置同意座標系；資料庫幫助參與者取得同一份指示紀錄；場景重建與深度則把指示連結到看得見的實體幾何形狀。</p>
+<p>對遠端指示來說，這是一個有用的改變。問題不再只有「anchor 在哪裡」，還包括「哪個表面支撐它」、「這次放置有多可信」，以及「可信度下降時應該顯示什麼」。回答這些問題，能做出更誠實的介面。</p>
+<h3>其他</h3>
+<p>下一步我想做一個小型比較 prototype。一種模式只用基本的 world-space hit test 放置指示；另一種會保留網格表面脈絡，並用深度處理 occlusion。我想比較重新定位後的位置恢復情況，也記錄哪些情境的網格不夠可靠、不能使用。</p>
+<p>我也想設計不依賴 LiDAR 的替代流程。即使裝置只能使用 plane detection 或手動放置，也應該能沿用相同的指示格式。介面不該隱藏差異，而應清楚說明這次使用哪一種放置方法。</p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+<h3>參考</h3>
+<p><strong>Apple Developer Documentation</strong></p>
+<p>ARKit: <a href="https://developer.apple.com/documentation/arkit">https://developer.apple.com/documentation/arkit</a></p>
+<p>ARWorldMap: <a href="https://developer.apple.com/documentation/arkit/arworldmap">https://developer.apple.com/documentation/arkit/arworldmap</a></p>
+<p>使用 scene depth 顯示 point cloud: <a href="https://developer.apple.com/documentation/arkit/displaying-a-point-cloud-using-scene-depth">https://developer.apple.com/documentation/arkit/displaying-a-point-cloud-using-scene-depth</a></p>
+</body></html>
