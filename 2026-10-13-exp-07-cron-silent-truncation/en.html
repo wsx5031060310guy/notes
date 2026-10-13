@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>My Cron Job Reported OK for 77 Days While Doing Nothing</title></head>
+<body>
+<h1>My Cron Job Reported OK for 77 Days While Doing Nothing</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-13-exp-07-cron-silent-truncation/en-cover.png" alt="My Cron Job Reported OK for 77 Days While Doing Nothing"></figure>
+<p>In this blog, I will describe how a scheduled job looked healthy for 77 days even though its real work never ran.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Two failures that hid each other</li>
+<li>How I found the problem</li>
+<li>The fix</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I use scheduled jobs for small automation tasks on my home server. A scheduler is useful because it can start work without a person being present. That convenience also creates a special reliability problem. If an interactive command fails, I see the failure. If a scheduled command never starts, there may be no process, no error, and no message to inspect.</p>
+<p>This job had two separate problems. First, one crontab line was longer than about 1,000 characters. It was silently truncated. The command half-ran and reported nothing wrong. Second, a shadow job record reused the same id as the real task. The scheduler status therefore showed OK for 77 days while the real work never ran.</p>
+<p>The status was not fabricated. It was answering the wrong question about the wrong record. That distinction matters. A green label may prove that one record is healthy. It does not prove that the intended command reached its last step.</p>
+<h3>Two Failures That Hid Each Other</h3>
+<p><strong>The long scheduler entry</strong></p>
+<p>A crontab entry can look like a convenient place to keep the complete workflow. It is visible in one file, and it appears easy to copy. In my case, that line grew beyond about 1,000 characters. The line was silently cut. Part of the command still ran, so the failure was not an obvious syntax error followed by a loud exit.</p>
+<p>A partial run is dangerous because it leaves evidence. There may be a start record, an early log line, or a process that exits without reaching the useful work. A check that only asks whether the task appeared at least once can treat that evidence as success.</p>
+<p><strong>The duplicate identity</strong></p>
+<p>The other problem was a shadow job record with the same id as the real task. The status view followed that shared identity and showed OK. Meanwhile, the real work had no completed run for 77 days.</p>
+<p>This is a namespace problem as much as a scheduling problem. An id should identify one thing. If two records can claim it, a monitor may observe one record while an operator thinks it represents another.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-13-exp-07-cron-silent-truncation/en-diagram-1.png" alt="Two silent failures made an inactive cron job look healthy"></figure>
+<p><em>The actual failure: a truncated command and a duplicate id produced misleading evidence.</em></p>
+<h3>How I Found the Problem</h3>
+<p>The important change was to stop asking, “Has this job ever finished?” That question can remain true forever after one old successful run. It does not tell me whether the latest attempt completed.</p>
+<p>I changed the freshness check to use a paired event. It finds the last start marker and then looks for the matching done marker. If the newest start has no done marker, the run is incomplete. If there is no recent start, the scheduler may not have launched the task at all. These are different failure modes, but both deserve attention.</p>
+<p>This method ties success to a specific attempt. A done marker from an older run cannot satisfy the latest start. It also moves the test closer to the result I care about: the workflow reached its final step.</p>
+<p>I also examined the job identity instead of trusting the summary status. That exposed the shadow record reusing the real task's id. The green status had been attached to an ambiguous identity, not to verified completion of the intended work.</p>
+<h3>The Fix</h3>
+<p><strong>Move the real command into a script</strong></p>
+<p>I put the real command into a script file. The crontab or launchd entry now has one short call. This removes the long inline command from the scheduler configuration and makes truncation much less likely. It also gives the workflow a normal file that can be read and reviewed.</p>
+<p>This separation gives each layer one job. The scheduler decides when to start. The script defines what to run. The run log records whether that attempt started and finished.</p>
+<p><strong>Check the latest attempt</strong></p>
+<p>The check now finds the last start marker and requires its done marker. It no longer treats any historical completion as proof of current health. This is a small rule, but it changes the meaning of green from “something once worked” to “the latest run finished.”</p>
+<p>The completed fix addresses the command location and the freshness test. A further improvement would be to enforce unique job ids when records are created. I also want the status page to display enough identity information that a shadow record cannot look like the intended task.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-13-exp-07-cron-silent-truncation/en-diagram-2.png" alt="Proposed end-of-run heartbeat design for scheduled jobs"></figure>
+<p><em>Proposed design: emit success only after the script reaches the end, then alert when that signal is absent.</em></p>
+<h3>Discussion</h3>
+<p><strong>Why total failure can be quiet</strong></p>
+<p>Many monitors depend on the program that they monitor. The program catches an exception, sends an alert, or writes a failed status. But a task that never starts cannot execute its own error handler. A command that stops before the reporting step has the same problem.</p>
+<p>This is why the absence of success is a useful signal for scheduled work. An external checker can know when success should have arrived. If it does not arrive, the checker can mark the run as missing even when there is no explicit error.</p>
+<p><strong>Why “OK” needs a definition</strong></p>
+<p>A scheduler can truthfully report that it accepted an entry. A process supervisor can truthfully report that a process exited. A script can truthfully report that its first stage ran. None of those statements necessarily means that the business task completed.</p>
+<p>For each scheduled job, I want to define the final observable event. It may be a done marker, a new file, or another durable result. The exact event depends on the work. The rule is that it must happen after the useful work, not before it.</p>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>A short scheduler entry is easier to inspect.</li>
+<li>A script keeps the workflow out of a fragile inline command.</li>
+<li>Paired start and done markers connect status to one run.</li>
+<li>An end-of-run heartbeat can detect a job that never reports an error.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>The script and scheduler configuration must be deployed together.</li>
+<li>Markers need a stable run identity so that attempts are not mixed.</li>
+<li>An external freshness check needs its own schedule and failure handling.</li>
+<li>A done marker proves the script reached the end, but critical outputs may still need direct verification.</li>
+</ul>
+<p>The last point is important. A heartbeat is evidence, not magic. If the purpose of a job is to create or update something, the strongest check may inspect that result. The heartbeat is most useful as the minimum signal that the workflow completed its own path.</p>
+<h3>Conclusion</h3>
+<p>My job looked healthy for 77 days because two weak assumptions aligned. A long crontab line was silently truncated, and a shadow record reused the id of the real task. The dashboard stayed green while the intended work did not run.</p>
+<p>I fixed the immediate problem by moving the command into a script and leaving one short scheduler call. I also changed the check to pair the latest start marker with its done marker. The broader lesson is simple: the only failure that never alerts is total failure. Success should be emitted at the very end, and its absence should become a signal.</p>
+<h3>Other</h3>
+<p>Next, I want to add an external end-of-run heartbeat and alert when it is missing. I also want to reject duplicate job ids and show the resolved script path in the status view. These are plans, not features of the current setup.</p>
+<p>I would also like to test three cases deliberately: the scheduler does not start the job, the script starts but never reaches the end, and the useful output is missing even though the script exits. Those tests would make the meaning of each health signal clearer.</p>
+<h3>Reference</h3>
+<p><strong>Scheduler documentation</strong></p>
+<p>crontab(5) — Linux manual page: <a href="https://man7.org/linux/man-pages/man5/crontab.5.html">https://man7.org/linux/man-pages/man5/crontab.5.html</a></p>
+<p>Creating launchd Jobs — Apple Developer Archive: <a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
