@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>On-Device ML on iOS: Converting a Model to Core ML</title></head><body>
+<h1>On-Device ML on iOS: Converting a Model to Core ML</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-14-con-07-coreml-conversion/en-cover.png" alt="On-Device ML on iOS: Converting a Model to Core ML"></figure>
+<p>In this blog, I will explain how I move from a trained model to a Core ML model without treating conversion as the finish line.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Introduction</li><li>Overview</li><li>Define the model contract</li><li>Convert with coremltools</li><li>Check accuracy after conversion</li><li>Quantization trade-offs</li><li>Demo workflow</li><li>Discussion</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Introduction</h3>
+<p>On-device machine learning changes the boundary of an application. The app can run inference where the data is created. It may not need to send every image, sound, or sensor sample to a remote service. This can improve privacy, responsiveness, and offline behavior. It also puts more responsibility on the application team. The model must fit the platform, accept the right inputs, produce understandable outputs, and behave well on real devices.</p>
+<p>For an iOS application, Core ML is the runtime-facing model format and framework. A model trained elsewhere usually needs a conversion step. Apple provides coremltools for converting models from common machine learning frameworks and for inspecting, testing, and optimizing the result. The command that produces a model file is important, but it is only one part of a reliable workflow.</p>
+<h3>Overview</h3>
+<p>I think of model conversion as a contract migration. The source model has a contract: input names, shapes, data types, preprocessing, output names, and output meaning. The Core ML model needs to preserve that contract in a form the application can use. If any part changes silently, the file can load successfully while predictions become wrong.</p>
+<p>The basic path is short. I start with a trained and evaluated source model. I make its expected inputs explicit. I convert it with coremltools. I compare the converted model against the source model with representative samples. Then I integrate it into the application and test it on actual target devices.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-14-con-07-coreml-conversion/en-diagram-1.png" alt="Workflow from a trained model to verified on-device inference"></figure>
+<p><em>A conversion workflow should compare outputs before moving to device testing.</em></p>
+<h3>Define the Model Contract</h3>
+<p><strong>Input shape</strong></p>
+<p>An input shape is not a minor detail. An image model may expect a batch dimension, a fixed height and width, and a particular channel order. A sequence model may accept variable length within a supported range. The application must know which dimensions are fixed and which are flexible. I prefer to write this down before conversion instead of asking the mobile code to guess later.</p>
+<p><strong>Data type and preprocessing</strong></p>
+<p>The numerical type matters, but preprocessing often matters more. Pixel scaling, channel order, color space, normalization, tokenization, and feature ordering are part of the model behavior. If training used one transform and the app uses another, the converted graph may be correct while the complete system is wrong. Image input features can also express image-related metadata, which can reduce duplicated preprocessing code in the app.</p>
+<p><strong>Output meaning</strong></p>
+<p>An output called scores is not enough documentation. I want to know whether it contains logits, probabilities, coordinates, embeddings, or another representation. I also want a stable mapping from indices to labels when the model performs classification. Clear output names make generated interfaces easier to understand and make test failures easier to diagnose.</p>
+<h3>Convert with coremltools</h3>
+<p>coremltools provides a unified conversion API for supported source frameworks. The exact conversion path depends on the source model. The important idea is to supply an exported or traced model in a supported form, declare its inputs, and choose conversion options deliberately. I avoid copying a conversion snippet without checking what assumptions it makes about shapes and types.</p>
+<p>Conversion can expose operations that do not map cleanly to Core ML. When that happens, the useful question is not only whether the converter reports an error. I also inspect whether the source graph contains dynamic behavior, unsupported operations, or preprocessing that belongs outside the model. Sometimes the right solution is to adjust export. Sometimes it is to represent an operation differently. The source of truth remains the model behavior, not the convenience of one conversion command.</p>
+<p>The deployment target is another design input. It influences which model capabilities the converter may use. I choose it from the application's real device support policy. I do not raise it merely to make a conversion easier without considering which users would be excluded.</p>
+<h3>Check Accuracy After Conversion</h3>
+<p>A converted model should be tested against the source model. I prepare representative inputs that cover ordinary cases, boundaries, and known difficult examples. For each input, I record the source output and the Core ML output, then compare them with a tolerance appropriate to the task.</p>
+<p>For classification, I can compare scores and predicted labels. For regression, I can measure numerical differences. For detection or segmentation, I need task-aware comparisons because small numerical changes may move a box, threshold, or mask. Exact bit-for-bit equality is not always realistic. Unexplained changes are still a reason to stop.</p>
+<p>I also separate conversion validation from application validation. A comparison on a development machine tells me whether the converted representation is close to the source. Device testing tells me whether the complete pipeline works with real camera frames, audio buffers, memory pressure, and application code. Both checks are necessary, and they answer different questions.</p>
+<h3>Quantization Trade-offs</h3>
+<p>Quantization represents model values with reduced precision. It can reduce storage and may improve execution characteristics, but it can also change predictions. The best choice depends on the model, the task, and the supported execution environment. There is no universal setting that makes every model smaller and equally accurate.</p>
+<p>I treat optimization as a second experiment, not as a default checkbox. First I establish a validated converted baseline. Then I create an optimized candidate and run the same evaluation set against both. I compare model size, task quality, and device behavior. If the quality change is unacceptable, I can keep the baseline or try a different optimization approach.</p>
+<p>This order makes diagnosis easier. If conversion and quantization happen together, a regression has two possible causes. If the plain conversion is already verified, any new difference is easier to connect to the optimization step.</p>
+<h3>Demo Workflow</h3>
+<ol><li>Freeze a known source-model artifact and its preprocessing definition.</li><li>Create representative samples and save the expected source outputs.</li><li>Declare input names, shapes, types, and flexibility explicitly.</li><li>Convert with coremltools using options that match the application target.</li><li>Load the Core ML model and compare its outputs with the saved baseline.</li><li>Integrate the model into a small application path and test real inputs on target devices.</li><li>Only then evaluate quantization or another optimization with the same samples.</li></ol>
+<p>This workflow gives every failure a narrower search area. Export failures belong before conversion. Numerical differences belong in conversion validation. Camera orientation, feature preparation, and UI integration belong in the application layer. Performance and memory behavior belong on the device.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits</strong></p>
+<p>On-device inference can keep sensitive inputs local, continue without a network connection, and remove a network round trip from the prediction path. Core ML also gives the application a platform-native way to describe and load models. A disciplined conversion process makes the boundary between machine learning and application code visible.</p>
+<p><strong>Drawbacks</strong></p>
+<p>The device environment is constrained. Model size, memory use, startup behavior, and thermal conditions matter. Supporting a broad device range can limit which model features are practical. A model update also travels through the application's delivery process unless the product has a carefully designed model distribution mechanism.</p>
+<p>The hardest drawback is false confidence. A model package that loads is not proof of semantic equivalence. A quick demo on one sample is not proof of accuracy. The cost of a test corpus and repeatable comparison is small compared with debugging wrong predictions after integration.</p>
+<h3>Conclusion</h3>
+<p>Converting a model to Core ML is a pipeline, not a file-format operation. I define the input and output contract, convert deliberately, compare against the source, test on devices, and optimize only after I have a baseline. This keeps convenience from hiding changes in model behavior.</p>
+<p>The main question is not “Did the converter finish?” It is “Does the application receive the same meaning from the model?” When that question has evidence behind it, the Core ML file is ready to become part of a product.</p>
+<h3>Other</h3>
+<p>I want to build a small reusable validation harness next. It would store representative inputs, run both model forms, report task-specific differences, and preserve the results with the model artifact. I also want to add device-side measurements for latency, memory, and energy behavior instead of assuming that a smaller package is always faster.</p>
+<h3>Reference</h3>
+<p><strong>Apple Core ML Tools</strong></p>
+<p>Guide to Core ML Tools: <a href="https://apple.github.io/coremltools/docs-guides/">https://apple.github.io/coremltools/docs-guides/</a></p>
+<p>Core ML Tools API Reference: <a href="https://apple.github.io/coremltools/index.html">https://apple.github.io/coremltools/index.html</a></p>
+<p>Core ML Model Format: <a href="https://apple.github.io/coremltools/mlmodel/index.html">https://apple.github.io/coremltools/mlmodel/index.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
