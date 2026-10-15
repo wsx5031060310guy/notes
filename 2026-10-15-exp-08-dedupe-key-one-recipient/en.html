@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>The Dedupe Key That Sent a Reminder to Only One Person</title></head>
+<body>
+<h1>The Dedupe Key That Sent a Reminder to Only One Person</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-15-exp-08-dedupe-key-one-recipient/en-cover.png" alt="The Dedupe Key That Sent a Reminder to Only One Person"></figure>
+<p>In this blog, I will describe how one incomplete deduplication key turned a batch notification into a message for only its first recipient.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits</li>
+<li>Drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I worked on a notification system that sent the same kind of reminder to a batch of recipients. The system needed protection against duplicate delivery. A retry, repeated event, or repeated worker run should not send the same reminder twice to the same person.</p>
+<p>The implementation used an idempotency key, also called a deduplication key. Before sending a reminder, the system checked whether that key had already been used. If it had, the send was skipped. This is a common and useful pattern. The problem was not the existence of deduplication. The problem was the meaning encoded in the key.</p>
+<p>The key did not include the recipient. It was also computed once, outside the loop that processed recipients. The first recipient used the key successfully. Every later recipient then presented the same key and looked like a duplicate.</p>
+<p>The result was simple and severe: only the first recipient in each batch received the message. Everyone else was deduplicated even though no message had been sent to them.</p>
+<h3>Overview</h3>
+<p>Idempotency is about defining when two operations are the same. That definition must match the business action. In this case, the action was not merely “send this reminder.” It was “send this reminder to this recipient.”</p>
+<p>A useful mental model is to write the identity of the operation as a tuple. For this system, the tuple needed at least two parts:</p>
+<ul>
+<li>The reminder or event being delivered.</li>
+<li>The recipient who should receive it.</li>
+</ul>
+<p>If the recipient is missing, operations for different people collapse into one identity. The data store then behaves correctly according to the key, but the key describes the wrong thing.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-15-exp-08-dedupe-key-one-recipient/en-diagram-1.png" alt="How one shared dedupe key suppresses later recipients"></figure>
+<p><em>The failure path: one key is reused, so later recipients are treated as duplicates.</em></p>
+<p>The placement of the calculation mattered too. Computing the key before the loop made it impossible for the value to vary by recipient. Even if the code looked tidy, its scope silently declared that the identity belonged to the whole batch.</p>
+<h3>Demo</h3>
+<p>Consider a batch with two recipients. The worker creates one key for the reminder. It enters the loop and handles the first recipient. The deduplication store has not seen the key, so the system records it and sends the message.</p>
+<p>The worker then handles the second recipient. It checks the same key. The store has already seen it, so the worker skips the send. From the deduplication component’s point of view, this is correct. From the product’s point of view, it is wrong.</p>
+<blockquote>
+<p>A deduplication system cannot recover information that the key never contained.</p>
+</blockquote>
+<p>The fix was to include the recipient in the key and compute the key inside the recipient loop. This changed the identity from a batch-level reminder to a recipient-level delivery. The implementation also gained a test with two recipients.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-15-exp-08-dedupe-key-one-recipient/en-diagram-2.png" alt="How recipient-scoped keys allow one delivery per recipient"></figure>
+<p><em>The fix: compute a distinct reminder-and-recipient key for every loop iteration.</em></p>
+<p>The two-recipient test is important because a one-recipient test cannot expose this class of bug. With one recipient, both the broken and corrected implementations send exactly one message. The faulty scope becomes visible only when the collection contains more than one identity.</p>
+<h3>Discussion</h3>
+<p><strong>Start with a sentence, not a hash</strong></p>
+<p>Before choosing a key format, I should be able to finish this sentence: “These two requests are duplicates when…” The answer should name the business identity directly. For a per-recipient reminder, the recipient belongs in that answer.</p>
+<p>The key can later be serialized or hashed. That is an implementation detail. A sophisticated hash does not make an incomplete identity correct. If two valid deliveries produce the same input, the collision was designed into the model before any hashing occurred.</p>
+<p><strong>Scope is part of the design</strong></p>
+<p>Variables computed outside a loop represent shared batch state. Variables computed inside a loop can represent item state. This is not only a coding-style issue. In delivery code, scope can define the boundary of idempotency.</p>
+<p>A code review should therefore inspect where a key is created, not only how it is formatted. The reviewer can ask whether every part that varies per operation is available at that point in the program.</p>
+<p><strong>Test the second valid operation</strong></p>
+<p>Duplicate tests often prove that the second identical request is rejected. That is necessary, but it is only half of the boundary. A good test also proves that a second valid request with a different recipient is accepted.</p>
+<p>The two cases look similar:</p>
+<ul>
+<li>Same reminder and same recipient: reject the repeat.</li>
+<li>Same reminder and different recipient: allow the delivery.</li>
+</ul>
+<p>The key design must separate those cases. The added two-recipient test checked the second one.</p>
+<p><strong>Do not blame the dedupe store</strong></p>
+<p>It is tempting to suspect caching, ordering, or an unreliable messaging provider when recipients are missing. Here, the deduplication mechanism followed its contract. It received the same key and rejected repeated use. The defect was in the application’s definition of sameness.</p>
+<p>This distinction matters during debugging. Logs that only say “duplicate” can sound reassuring. A more useful debugging view would show which business fields produced the key. I want to keep such visibility in mind for future systems, without exposing sensitive recipient data.</p>
+<h3>Benefits</h3>
+<p>The corrected design keeps the original benefit of idempotency. A repeated attempt for the same reminder and recipient can still be recognized as the same delivery. At the same time, another recipient receives a different key and is not blocked.</p>
+<p>Computing the key inside the loop also makes the intent local. The code that knows the current recipient creates the identity for that recipient. This reduces the distance between business meaning and implementation.</p>
+<p>The two-recipient test provides a compact regression check. It exercises the exact boundary that the earlier test shape missed: one event, more than one legitimate destination.</p>
+<h3>Drawbacks</h3>
+<p>A more specific key has more fields to define and normalize. The system must decide which recipient identifier is stable and whether the reminder identity changes when content changes. Those questions should be answered by the product’s delivery rules, not by convenience.</p>
+<p>Per-recipient keys also create more deduplication records than one batch-level key. That is expected because the system is tracking more actual operations. A production design should plan retention and cleanup according to retry needs.</p>
+<p>Finally, idempotency does not prove that delivery succeeded. It only controls repeated attempts under a chosen identity. A better design would separately record delivery outcomes and make missing or failed deliveries observable. That is a recommendation for future work, not a behavior established by this incident.</p>
+<h3>Conclusion</h3>
+<p>The bug came from a key that answered the wrong question. It identified the reminder, but not the reminder’s recipient. Because the key was computed once outside the loop, every recipient after the first looked like a duplicate.</p>
+<p>The fix was precise: include the recipient, calculate the key per recipient inside the loop, and test with two recipients. My main lesson is to define “the same message” in business terms before encoding it. Idempotency works only when its identity matches the operation users expect.</p>
+<h3>Other</h3>
+<p>I want to try writing idempotency rules as small truth tables before implementation. Each table would include repeated requests, different recipients, and any other field that changes the meaning of delivery.</p>
+<p>I also want future tests to cover both sides of the boundary: the duplicate that must be rejected and the similar but valid operation that must be allowed. For notification systems, a small batch is often the shortest path to exposing a batch-scope mistake.</p>
+<h3>Reference</h3>
+<p><strong>Project source</strong></p>
+<p>This experience is based on sanitized project notes. No client names, internal systems, or external references are included.</p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
