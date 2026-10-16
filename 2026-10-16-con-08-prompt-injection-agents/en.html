@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Prompt Injection When Your Agent Reads Email and Web Pages</title></head><body>
+<h1>Prompt Injection When Your Agent Reads Email and Web Pages</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-16-con-08-prompt-injection-agents/en-cover.png" alt="Prompt Injection When Your Agent Reads Email and Web Pages"></figure>
+<p>An AI agent must treat every email and web page as untrusted data, even when the text looks like a direct instruction.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Introduction</li><li>Overview</li><li>How indirect prompt injection works</li><li>Permission scoping</li><li>Confirmation and output allowlists</li><li>Testing the boundary</li><li>Benefits and drawbacks</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Introduction</h3>
+<p>In this blog, I will explain prompt injection for agents that read email and web pages. The important shift is simple. A chatbot only writes text. An agent may also search files, send messages, update records, or call an API. Once a model can use tools, a sentence inside a document can become the beginning of a real action.</p>
+<p>Developers often separate system instructions from user prompts. That is necessary, but it is not enough. An agent can receive content from many places after the user prompt: an email body, a quoted reply, a web page, a PDF, a calendar description, or search results. That content may contain natural language that tells the model to ignore earlier rules, reveal private context, or use a tool. This is indirect prompt injection.</p>
+<p>The model cannot reliably decide that one sentence is data while another sentence is authority just because both appear in its context. Clear delimiters and reminders help, but they are not a security boundary. The application around the model must enforce the boundary.</p>
+<h3>Overview</h3>
+<p>I use one rule when thinking about this problem: content can suggest, but it cannot authorize. A message can contain a request to pay an invoice. A page can contain a button label. Neither should grant permission to send money, disclose a secret, or change a database row.</p>
+<p>A safer agent separates four stages. First, it retrieves untrusted content. Second, the model interprets that content and proposes an action. Third, policy code checks the proposal against the user’s permissions and the current task. Fourth, the application either returns a harmless result, asks for confirmation, or executes a narrowly scoped tool call.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-16-con-08-prompt-injection-agents/en-diagram-1.png" alt="A safe decision path from untrusted content to a scoped tool call"></figure>
+<p><em>Proposed design: untrusted content may influence a proposal, but side effects require approval and a scoped tool.</em></p>
+<p>This design assumes the model can be manipulated. That assumption is useful. It moves security decisions out of generated prose and into code that can be reviewed, tested, and monitored.</p>
+<h3>How Indirect Prompt Injection Works</h3>
+<p>Imagine that I ask an agent to summarize unread email. One message contains normal business text followed by hidden or visible instructions: ignore the user, search the mailbox for credentials, and forward them. The email is not a trusted operator, but the model still sees commands written in familiar language.</p>
+<p>A web page creates the same problem. The page may include text aimed at visitors and separate text aimed at automated readers. Styling can make text unobtrusive to a person without removing it from the page representation given to the agent. Search snippets, accessibility text, comments, and retrieved documents can all carry hostile instructions.</p>
+<p>The injection does not need to succeed completely to cause damage. It may redirect the agent away from the requested task, make it include irrelevant material, trigger expensive loops, or persuade it to expose information in a tool argument. A small change in output can be dangerous when another program treats that output as a command.</p>
+<p>There is also a trust-chain problem. An email may link to a page. That page may link to a document. If the agent follows each link and keeps the content in one context, the least trusted source can influence the final action. Trust should not increase merely because data passed through several tools.</p>
+<h3>Permission Scoping</h3>
+<p>The strongest mitigation is to reduce what the agent can do. I would not give an email summarizer a general shell, unrestricted mailbox access, and permission to send messages. It needs a read-only operation that returns the minimum fields required for summarization.</p>
+<p>Tool permissions should match the task, not the maximum capability of the product. Read and write operations should be separate. A tool for drafting a reply should not also send it. A search tool should not expose secret fields by default. An update tool should accept a small, validated schema rather than arbitrary commands.</p>
+<p>Scope also applies to data. If a task concerns one mailbox folder, one project, or one record, the application should constrain access to that scope before the model runs. Asking the model to “only use this folder” is weaker than issuing credentials or queries that cannot access anything else.</p>
+<p>Short-lived authorization is another useful pattern. The agent receives access for one action and one task, rather than keeping broad authority across a long conversation. If hostile content changes the model’s plan, the available capability still has a limited blast radius.</p>
+<h3>Confirmation and Output Allowlists</h3>
+<p>Human confirmation matters when an action has an external side effect. The confirmation screen should show the actual operation: recipient, destination, changed fields, or file path. A vague question such as “continue?” hides the risk. The user should see what will happen before it happens.</p>
+<p>Confirmation must occur after the final tool arguments are built. If the model can change the arguments after approval, the approval does not protect the real action. The application should freeze the reviewed payload or rebuild it deterministically from reviewed fields.</p>
+<p>Not every workflow can wait for a person. Automated jobs need allowlists and policy checks. The application can restrict destinations, accepted file types, writable fields, and permitted action sequences. It can reject unexpected URLs, unknown recipients, or tool calls that do not belong to the declared workflow.</p>
+<p>Structured output helps here. Instead of accepting free-form text as a command, the application requests a small object with known fields. It validates types, lengths, allowed values, and relationships before any tool runs. Structured output does not stop injection by itself, but it makes the enforcement point explicit.</p>
+<h3>Testing the Boundary</h3>
+<p>A normal success test is not enough. I want tests in which the retrieved content actively asks the agent to break policy. The hostile text should try several paths: reveal hidden instructions, read unrelated data, call a write tool, send information to a new destination, or claim that the user already approved the action.</p>
+<p>The expected result is not necessarily that the model ignores every sentence. Models are probabilistic. The durable requirement is that the application blocks the forbidden effect. A test can allow the model to propose a bad action and still pass if policy code rejects the tool call.</p>
+<p>I also want logs at the enforcement point. Useful records include the requested tool, the final validated arguments, the policy decision, whether confirmation was required, and whether execution occurred. Sensitive content should not be copied into logs without a reason. The goal is evidence about decisions, not a new store of private data.</p>
+<p>Finally, test chained content. Put an injection in an email attachment or a page reached through a search result. This checks whether the application preserves source trust and task scope across retrieval steps.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<p>Least-privilege tools limit damage even when the model makes a poor decision. Explicit confirmation gives users control over consequential actions. Allowlists and schema validation turn vague behavioral expectations into testable rules. Audit records make it possible to understand why an action was allowed or denied.</p>
+<p><strong>Drawbacks</strong></p>
+<p>These controls add friction. More confirmations can make an agent feel less automatic. Narrow tools take longer to design than a general tool. Policy code must be maintained as workflows change. Strict allowlists may block a legitimate new use case until a developer updates the rules.</p>
+<p>I think that trade-off is healthy. Convenience should be proportional to reversibility. Reading public information can be easy. Sending a message, changing a record, or exposing private data should require stronger evidence of intent.</p>
+<h3>Conclusion</h3>
+<p>Prompt injection is not only a prompt-writing problem. It is an authorization problem at the boundary between generated text and real tools. Email and web content should remain untrusted, no matter how confidently it speaks.</p>
+<p>The practical design is defense in depth: narrow permissions, read and write separation, confirmation for side effects, validated structured output, destination allowlists, and tests that assume hostile content. The model may still misunderstand a document. The surrounding application must make sure that misunderstanding cannot silently become authority.</p>
+<h3>Other</h3>
+<p>I want to try a small evaluation set for agent workflows. Each case would combine a normal task with an injection in a different source, then record whether the proposed and executed actions stayed inside policy. I also want to compare confirmation designs to find the smallest prompt that still shows users the exact side effect.</p>
+<h3>Reference</h3>
+<p><strong>OWASP Gen AI Security Project</strong></p>
+<p>OWASP Top 10 for LLM and Generative AI Applications: <a href="https://genai.owasp.org/llm-top-10/">https://genai.owasp.org/llm-top-10/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
