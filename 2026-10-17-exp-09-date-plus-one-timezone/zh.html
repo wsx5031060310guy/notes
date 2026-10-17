@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>為什麼我的台北報表漏掉凌晨零點到早上八點的資料</title></head>
+<body>
+<h1>為什麼我的台北報表漏掉凌晨零點到早上八點的資料</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-17-exp-09-date-plus-one-timezone/zh-cover.png" alt="為什麼我的台北報表漏掉凌晨零點到早上八點的資料"></figure>
+<p>這篇文章要分享兩段以 UTC 為基準的日期計算，如何讓台北業務報表漏掉本地一天最前面的八個小時。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>背景</li><li>概覽</li><li>示範</li><li>討論</li><li>優點</li><li>缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>背景</h3>
+<p>我處理過一份給台北業務使用的廣告成效報表。報表會依日期彙整活動。這看起來很簡單，但業務上的一天並不等於 UTC 的一天。</p>
+<p>查詢使用類似 Postgres <strong>(date + 1)::timestamptz</strong> 的運算式建立日期範圍，再用它篩選資料列。呼叫端也用 JavaScript 的 <strong>toISOString()</strong> 建立日期。系統的兩端因此都依賴 UTC。</p>
+<p>Postgres 將 date 轉成 timestamptz 時，會按照資料庫工作階段的時區，把日期展開成零點。這個案例中的邊界是 UTC。JavaScript 呼叫端描述的也是 UTC 日曆日。兩邊彼此一致，卻沒有描述台北的業務日。</p>
+<p>台北比 UTC 快八小時。本地時間從凌晨零點到早上八點的活動已經屬於新的一天，但在 UTC 日曆中仍是前一天。報表因此把這段時間排除在業務預期的日期之外。</p>
+<h3>概覽</h3>
+<p>日期看似完整，其實只是一個日曆標籤。套用時區之前，它無法指向一個確切時間點。「某一天的零點」會因解讀它的時區而指向不同瞬間。</p>
+<p>這份報表有三層不同意義：</p>
+<ul><li>業務要求的是台北的一天。</li><li>JavaScript 呼叫端透過 toISOString() 產生 UTC 日期。</li><li>Postgres 按照資料庫工作階段時區轉換日期邊界。</li></ul>
+<p>每一段操作單獨看都很合理，組合後卻讓報表的時間範圍位移。更危險的是，呼叫端、查詢與後續檢查都使用同一個錯誤模型。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-17-exp-09-date-plus-one-timezone/zh-diagram-1.png" alt="相同 UTC 假設如何排除台北凌晨資料"></figure>
+<p><em>錯誤與修正：一致的 UTC 假設掩蓋了缺口，直到日期邊界改為明確使用 Asia/Taipei。</em></p>
+<h3>示範</h3>
+<p>假設使用者要求台北某一天的報表。正確範圍應該從 Asia/Taipei 的凌晨零點開始，到下一個 Asia/Taipei 凌晨零點結束。資料庫應該把已儲存的時間戳記，與這兩個明確時間點比較。</p>
+<p>有問題的流程從不同地方開始。JavaScript 透過 toISOString() 轉換日期，得到 UTC 的時間點。SQL 運算式又在 UTC 工作階段中將日期轉成 timestamptz，建立下一個邊界。最後的範圍代表 UTC 的一天，而不是台北業務所要的一天。</p>
+<p>這個差異讓本地時間凌晨零點到早上八點的活動離開它所屬的日期。在這段時間開始的廣告活動會從報表消失，但它們的花費仍被計入。因此，使用者可能看到總花費與可見活動資料列對不上的結果。</p>
+<p>這不是明顯的當機。查詢有回傳資料，報表也能顯示。沒有型別錯誤、資料庫例外或無效時間戳記。軟體持續運作，只有結果是錯的。</p>
+<blockquote><p>當系統與檢查共用同一個時區錯誤時，兩者一致並不能證明結果正確。</p></blockquote>
+<p>驗證流程重複使用呼叫端的日期計算。它用同樣的 UTC 邊界詢問資料庫，因此報表與檢查結果一致，錯誤也就被掩蓋。</p>
+<p>修正方式是在業務時區中明確建立日期邊界，例如使用 <strong>AT TIME ZONE 'Asia/Taipei'</strong>。測試也要放入本地凌晨零點後不久的時間戳記。這個案例直接位在舊計算曾經漏掉的區間內。</p>
+<h3>討論</h3>
+<p><strong>從業務日曆開始</strong></p>
+<p>在寫 SQL 之前，我應該先說清楚由哪一個日曆定義報表。對台北的業務而言，「今天」就是台北的今天。底層如何儲存時間戳記，不會改變這項需求。</p>
+<p>把時間戳記儲存成絕對時間點很實用，系統可以一致地比較事件。但報表是另一件事。要把一個時間點歸入某個日期，仍需要日曆與時區。這項轉換應該放在設計中清楚可見的邊界。</p>
+<p><strong>使用半開區間</strong></p>
+<p>每日範圍可以寫成「大於等於開始時間，且小於下一個開始時間」。這比自行建立當天最後一刻更容易理解。關鍵是兩個開始時間都必須先在業務時區中建立。</p>
+<p>正確順序是：選擇本地日期、將它的凌晨零點解讀成 Asia/Taipei、用相同時區建立下一個本地日期的凌晨零點，最後才拿這兩個時間點比較資料。</p>
+<p><strong>不要讓 toISOString 定義本地日期</strong></p>
+<p>當我需要一個明確的 UTC 時間表示時，toISOString() 很有用。但它不保證保留使用者的本地日曆日期。如果用它建立報表日期，本地零點可能會變成另一個 UTC 日期。</p>
+<p>較安全的做法是把使用者要求的日曆日期與業務時區當成兩個不同概念。伺服器就能刻意建立邊界，而不是讓序列化工具或工作階段預設值替系統決定。</p>
+<p><strong>測試日期邊界</strong></p>
+<p>中午的案例不足以測試時區邏輯。台北中午在 UTC 中仍是同一個日曆日，所以錯誤的 UTC 日期查詢也可能包含它。剛過本地零點的時間戳記更有價值，因為它位於台北與 UTC 的不同日期之間。</p>
+<p>我也希望檢查能獨立於被驗證的實作。如果兩者都用同一個 helper 推導預期結果，就可能重現相同錯誤。準備一小組明確時間點與預期本地日期，能為檢查提供獨立依據。</p>
+<h3>優點</h3>
+<p>修正後的邊界符合業務對一天的定義。本地零點之後的活動會留在使用者預期的日期，廣告活動資料列與花費也能在同一個本地時間範圍內評估。</p>
+<p>明確指定時區，也能消除對資料庫工作階段預設值的依賴。讀程式的人可以直接看到查詢或邊界建立程式所使用的時區，讓程式碼審查更容易。</p>
+<p>日期邊界測試雖然很小，卻能精準檢查曾經暴露問題的區間，而不是只證明一般白天時間可以運作。</p>
+<h3>缺點</h3>
+<p>明確處理時區會讓介面多出一些概念。呼叫端可能要傳遞尚未轉成 UTC 時間點的日曆日期，伺服器也必須知道業務使用哪個時區。這比傳一個 ISO 字串麻煩，但它才是實際需求。</p>
+<p>通用日期處理也不應假設每個時區永遠有固定偏移。較好的原則是使用具名時區與日曆邊界，不要把偏移量寫死。</p>
+<p>最後，修正一段查詢不代表所有報表都已完整。更好的設計會把日期邊界加入回歸測試，並比較可見資料列與彙總數字。這些是我未來想做的改善，不是這次事件中已完成的項目。</p>
+<h3>結論</h3>
+<p>這個錯誤並不是由單一明顯無效的時間戳記造成，而是兩個元件對錯誤的一天達成一致。JavaScript 產生 UTC 日期，Postgres 在 UTC 零點展開邊界，驗證流程也重複同一個假設。</p>
+<p>對台北業務來說，結果就是本地凌晨零點到早上八點的活動被排除。修正方式是在 Asia/Taipei 中明確建立每日邊界，並用本地凌晨零點後不久的時間戳記測試。</p>
+<p>我得到的主要教訓很簡單：日期只有在時區明確後，才能成為報表邊界。當正確性取決於本地日曆時，不該讓 UTC 序列化或資料庫預設值默默定義一天。</p>
+<h3>其他</h3>
+<p>我想讓報表介面更清楚，明確分開日曆日期與業務時區。我也想建立可重複使用的日期邊界測試資料，包括本地零點、下一個零點，以及在不同工作階段設定下解讀的日期。</p>
+<p>未來的檢查應該從明確案例取得預期結果，而不是使用正式環境相同的日期 helper。獨立檢查更有機會在實作選錯日曆時產生不同結果。</p>
+<h3>參考</h3>
+<p><strong>專案資料</strong></p>
+<p>這次經驗以匿名化專案筆記為基礎，未包含客戶名稱或內部系統名稱。</p>
+<p><strong>PostgreSQL 文件</strong></p>
+<p>Date/Time Types: <a href="https://www.postgresql.org/docs/current/datatype-datetime.html">https://www.postgresql.org/docs/current/datatype-datetime.html</a></p>
+<p>Date/Time Functions and Operators: <a href="https://www.postgresql.org/docs/current/functions-datetime.html">https://www.postgresql.org/docs/current/functions-datetime.html</a></p>
+<p><strong>JavaScript 文件</strong></p>
+<p>Date.prototype.toISOString(): <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString">https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

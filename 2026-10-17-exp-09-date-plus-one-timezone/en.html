@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Why My Taipei Reports Lost Everything Between Midnight and 8 a.m.</title></head>
+<body>
+<h1>Why My Taipei Reports Lost Everything Between Midnight and 8 a.m.</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-17-exp-09-date-plus-one-timezone/en-cover.png" alt="Why My Taipei Reports Lost Everything Between Midnight and 8 a.m."></figure>
+<p>In this blog, I will describe how two UTC-based date calculations made a Taipei business report lose the first eight hours of its local day.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits</li>
+<li>Drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I worked on an ad-performance report for a business in Taipei. The report grouped activity by day. That sounds simple, but a business day is not the same thing as a UTC day.</p>
+<p>The query filtered rows with a date range built around a Postgres expression like <strong>(date + 1)::timestamptz</strong>. The caller also created its date values with JavaScript <strong>toISOString()</strong>. Both parts of the system therefore leaned on UTC.</p>
+<p>The cast in Postgres expands a date at midnight in the database session’s time zone. In this case, that boundary was UTC. The JavaScript caller also described a UTC calendar day. The two sides agreed with each other, but they did not describe the business day in Taipei.</p>
+<p>Taipei is eight hours ahead of UTC. Activity from local midnight through 08:00 belongs to the new local day, but it still falls on the previous UTC date. The report excluded that interval from the day where the business expected to see it.</p>
+<h3>Overview</h3>
+<p>A date looks like a complete value, but it is only a calendar label. It does not identify an instant until a time zone is applied. “Midnight on this date” can point to different moments depending on which zone interprets it.</p>
+<p>The report had three layers of meaning:</p>
+<ul>
+<li>The business asked for a day in Taipei.</li>
+<li>The JavaScript caller produced a UTC day with toISOString().</li>
+<li>Postgres converted the date boundary using the database session’s time zone.</li>
+</ul>
+<p>Each operation was reasonable in isolation. Together, they shifted the reporting window. The dangerous part was consistency: the caller, query, and later check all used the same mistaken model.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-17-exp-09-date-plus-one-timezone/en-diagram-1.png" alt="How matching UTC assumptions excluded early Taipei activity"></figure>
+<p><em>The failure and fix: matching UTC assumptions hid the gap until the day boundary was defined in Asia/Taipei.</em></p>
+<h3>Demo</h3>
+<p>Imagine that the requested report date is a local day in Taipei. The correct range starts at 00:00 in Asia/Taipei and ends at the next 00:00 in Asia/Taipei. The database should compare stored timestamps against those two explicit instants.</p>
+<p>The broken path started differently. JavaScript converted a date through toISOString(), which describes an instant in UTC. The SQL expression then built the next boundary with a timestamptz cast under a UTC session. The resulting range represented a UTC day rather than the intended Taipei day.</p>
+<p>That difference removed local activity between 00:00 and 08:00 from the day it belonged to. Campaigns that started during that interval disappeared from the report. Their spend was still counted, so the output could contain totals that did not line up with the visible campaign rows.</p>
+<p>This was not an obvious crash. The query returned data. The report rendered. There was no type error, database exception, or invalid timestamp. The result was wrong while the software remained operational.</p>
+<blockquote><p>When the system and its check share the same time-zone mistake, agreement is not evidence of correctness.</p></blockquote>
+<p>The verification path repeated the caller’s date calculation. It asked the database a question framed with the same UTC boundary. The report and the check agreed, so the bug stayed hidden.</p>
+<p>The fix was to build the day boundaries explicitly in the business time zone, using an expression such as <strong>AT TIME ZONE 'Asia/Taipei'</strong>. The test also needed a timestamp just after local midnight. That example sits directly inside the interval that the old calculation lost.</p>
+<h3>Discussion</h3>
+<p><strong>Start with the business calendar</strong></p>
+<p>Before writing SQL, I should state which calendar owns the report. For an ad-performance report used by a Taipei business, “today” means today in Taipei. The storage format does not change that requirement.</p>
+<p>Storing timestamps as absolute instants is useful. It lets systems compare events consistently. Reporting is different: grouping an instant into a date requires a calendar and a time zone. That conversion belongs at a clear boundary in the design.</p>
+<p><strong>Use half-open ranges</strong></p>
+<p>A daily range is easier to reason about as “greater than or equal to the start, and less than the next start.” This avoids inventing an end-of-day value. The important point is that both starts must first be constructed in the business time zone.</p>
+<p>The next day is a calendar operation, not simply a formatting trick. The intended sequence is: choose the local date, interpret its midnight in Asia/Taipei, construct the next local date’s midnight in the same zone, and then compare timestamps against those instants.</p>
+<p><strong>Do not let toISOString define a local day</strong></p>
+<p>toISOString() is useful when I need an unambiguous UTC representation of an instant. It is not a promise to preserve a user’s local calendar date. If I use it while building report dates, a local midnight can become a different UTC date.</p>
+<p>The safer approach is to carry the requested calendar date and the business time zone as separate concepts. The server can then construct boundaries deliberately instead of allowing a serializer or session default to choose them.</p>
+<p><strong>Test around the boundary</strong></p>
+<p>Middle-of-day examples are weak tests for time-zone logic. Noon in Taipei is also on the same UTC calendar date, so a broken UTC-day query may still include it. A timestamp just after local midnight is much more valuable because it crosses the date boundary between Taipei and UTC.</p>
+<p>I also want checks to be independent of the implementation they verify. If both derive expected results with the same helper, they can reproduce the same bug. A small fixture with explicit instants and expected local dates gives the check a separate source of truth.</p>
+<h3>Benefits</h3>
+<p>The corrected boundary makes the report follow the business definition of a day. Activity after local midnight remains attached to the date users expect. Campaign rows and their spend can be evaluated within the same local reporting window.</p>
+<p>An explicit time zone also removes dependence on the database session default. A reader can see the intended zone in the query or boundary-building code. That makes reviews easier and reduces the chance that another environment interprets the same date differently.</p>
+<p>The boundary-focused test is small but useful. It checks the exact interval that exposed the defect rather than proving only that an ordinary daytime timestamp works.</p>
+<h3>Drawbacks</h3>
+<p>Explicit time-zone handling adds concepts to the interface. The caller may need to send a calendar date without converting it to a UTC instant, and the server must know which business zone applies. That is more work than passing one ISO string, but it represents the real requirement.</p>
+<p>Time-zone rules can also make general date handling more complex. A reusable reporting design should not assume that every zone always has the same offset. The important principle is to use named zones and calendar boundaries rather than hard-code an offset.</p>
+<p>Finally, a corrected query does not prove every report is complete. A better design would add boundary cases to regression tests and compare visible rows with aggregate totals. Those are recommendations for future work, not changes established by this incident.</p>
+<h3>Conclusion</h3>
+<p>The bug was not caused by one obviously invalid timestamp. It came from two components agreeing on the wrong day. JavaScript produced a UTC date, Postgres expanded the boundary at UTC midnight, and the verification repeated the same assumption.</p>
+<p>For a Taipei business, that excluded local activity from midnight through 08:00. The fix was to construct day boundaries explicitly in Asia/Taipei and test with timestamps just after local midnight.</p>
+<p>My main lesson is simple: a date is not a reporting boundary until its time zone is explicit. When correctness depends on a local calendar, UTC serialization and database defaults should not silently define the day.</p>
+<h3>Other</h3>
+<p>I want to make the reporting contract clearer by naming both the calendar date and the business time zone at the interface. I also want to build a small set of reusable boundary fixtures for local midnight, the next midnight, and dates interpreted under different session settings.</p>
+<p>For future checks, I want expected results to come from explicit examples rather than the same date helper used by production code. An independent check is more likely to disagree when the implementation chooses the wrong calendar.</p>
+<h3>Reference</h3>
+<p><strong>Project source</strong></p>
+<p>This experience is based on sanitized project notes. No client names or internal systems are included.</p>
+<p><strong>PostgreSQL documentation</strong></p>
+<p>Date/Time Types: <a href="https://www.postgresql.org/docs/current/datatype-datetime.html">https://www.postgresql.org/docs/current/datatype-datetime.html</a></p>
+<p>Date/Time Functions and Operators: <a href="https://www.postgresql.org/docs/current/functions-datetime.html">https://www.postgresql.org/docs/current/functions-datetime.html</a></p>
+<p><strong>JavaScript documentation</strong></p>
+<p>Date.prototype.toISOString(): <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString">https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
