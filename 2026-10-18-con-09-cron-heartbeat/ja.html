@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>Dead Man’s Switch：実行されないジョブを監視する方法</title></head>
+<body>
+<h1>Dead Man’s Switch：実行されないジョブを監視する方法</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/ja-cover.png" alt="Dead Man’s Switch：実行されないジョブを監視する方法"></figure>
+<p>この記事では、実行すらされなかった定期ジョブを、シンプルな heartbeat で検知する方法を説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>はじめに</li><li>見えない障害</li><li>概要</li><li>Heartbeat の設計</li><li>考察</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>はじめに</h3>
+<p>定期ジョブは、正常に動いている間は意識されにくいものです。朝にレポートが届き、夜にバックアップが走り、古いデータが自動で削除されます。スケジューラは背景の一部になります。</p>
+<p>ここには独特の監視問題があります。通常のエラーなら、stack trace、失敗ステータス、ログなどが残ります。しかし、スケジューラがプロセスを開始しなかった場合はどうでしょうか。プロセスもログもエラーイベントも存在しない可能性があります。障害そのものが「不在」なのです。</p>
+<p>Dead man’s switch は、このケースを扱います。ジョブは最後まで成功した後にだけ完了シグナルを送ります。独立した monitor が決められた時間内にそのシグナルが届くことを期待します。届かなければ alert を出します。</p>
+<p>重要なのは network request そのものではありません。ジョブの外側から、期待した結果を監視することです。「エラーが報告されなかった」だけでは弱い証拠です。「期待した完了シグナルが時間内に届いた」ほうが、はるかに強い証拠です。</p>
+<h3>見えない障害</h3>
+<p>多くの監視は failure event から始まります。アプリケーションが例外を捕捉して報告し、スケジューラが non-zero exit code を記録し、ログ規則が failed や timeout を検索します。どれも役立ちますが、問題を報告できる段階まで何かが実行されたことを前提にしています。</p>
+<p>定期ジョブは、その前に消えることがあります。schedule が無効になった、machine が offline になった、設定が壊れた、runtime の起動に必要な credential が使えない、あるいは scheduler 自体が停止した場合です。ジョブは制御を受け取らないため、自分の失敗を報告できません。</p>
+<p>そのため、静かな dashboard は誤解を招きます。静かな状態は正常かもしれませんが、報告経路全体が停止している可能性もあります。監視では期限付きの問いが必要です。「このジョブは、期待した時刻に完了したか」です。</p>
+<p>この問いにより、不在を測定可能な状態へ変えられます。monitor は最後に成功した heartbeat を保存し、その時刻を予定と許容遅延に比較します。状態は fresh、late、missing に分類できます。遅延や欠落が、別のシステムから見える event になります。</p>
+<h3>概要</h3>
+<p>基本的な流れには五つの部分があります。Scheduler がジョブを起動し、ジョブが開始され、本来の処理を行い、結果を確認し、最後に完了 heartbeat を送ります。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/ja-diagram-1.png" alt="成功した定期ジョブが最後に heartbeat を送る流れ"></figure>
+<p><em>成功 heartbeat は、本来の処理を確認した後、ジョブの最後に置きます。</em></p>
+<p>最初に heartbeat を送ると、違う問いに答えることになります。プロセスが始まったことは証明できますが、完了は証明できません。開始シグナルの後で途中失敗しても、monitor は green のままになり、必要な結果だけが欠けます。</p>
+<p>シグナルは job と environment を明確に識別する必要もあります。日次レポートと週次 cleanup で一つの monitor を共有すべきではありません。schedule、deadline、対応手順が違うからです。別々の identity があれば、last-success time に意味が生まれます。</p>
+<p>Monitor は障害を見つけられる程度に独立させます。Job と heartbeat checker が同じ scheduler、host、通知経路を使うと、一つの障害で両方が止まります。完全な独立は常に現実的とは限りませんが、明らかな単一障害点を避ける価値はあります。</p>
+<h3>Heartbeat の設計</h3>
+<p><strong>期待時間を決める</strong></p>
+<p>Schedule は、そのまま deadline ではありません。毎時ちょうどに始まる job でも、完了は数分後かもしれません。Monitor には通常の実行時間と少しの遅延を含む completion window が必要です。余裕は実際の挙動に基づくべきで、障害を隠すほど大きくしてはいけません。</p>
+<p>頻繁な job なら、一回または複数回の interval 欠落後に alert を出せます。日次 job なら、通常の完了時間が閉じるまで待てます。大切なのは、欠落した結果が問題になる時点で、次の利用者が依存する前に知らせることです。</p>
+<p><strong>動作ではなく成功を送る</strong></p>
+<p>Heartbeat は必要な手順がすべて成功した後に送ります。File を作る job なら、file が存在して利用できることを確認します。Data を書くなら、必要な write を確認します。Report を送るなら、job が約束した delivery を基準にします。最後の signal は script が最終行に到達したことではなく、約束した結果が生まれたことを意味すべきです。</p>
+<p><strong>失敗を見えるままにする</strong></p>
+<p>成功時も失敗時も通る広い cleanup block から、同じ成功 heartbeat を送ってはいけません。それではすべての実行が正常に見えます。Failure path は別の診断情報を送っても構いませんが、last-success clock を更新してはいけません。</p>
+<p><strong>再送を安全にする</strong></p>
+<p>Network retry により、同じ heartbeat が複数回届くことがあります。Monitor は同じ完了に対する重複 signal を無害として扱うべきです。重要なのは retry で増える count ではなく、最新の有効な成功時刻です。</p>
+<h3>考察</h3>
+<p>外部 checker は設計のもう半分を担います。完了 signal が届くべき時刻を知り、最新 heartbeat を記録します。許容時間が終わると fresh か late かを判断し、運用者が気付ける経路へ alert を送ります。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/ja-diagram-2.png" alt="独立した monitor が heartbeat の到着時刻を確認する流れ"></figure>
+<p><em>Monitor は完了シグナルの欠落を明示的な遅延状態と alert に変えます。</em></p>
+<p><strong>利点</strong></p>
+<ul><li>開始されなかった job を検知できます。</li><li>Error 検索だけでなく freshness を測れます。</li><li>各 scheduled outcome に明確な deadline を設定できます。</li><li>Script、container、timer service に追加しやすい単純な仕組みです。</li></ul>
+<p><strong>欠点</strong></p>
+<ul><li>Deadline が悪いと、noise または検知遅延が生じます。</li><li>結果確認前に送れば、heartbeat 自体が嘘になります。</li><li>Checker と alert channel も test が必要な infrastructure になります。</li><li>Green heartbeat は完了を示しますが、data quality までは保証しません。</li></ul>
+<p>最後の点は重要です。Report は時間通りに完成しても、内容が間違っている可能性があります。Backup は完了しても restore できないかもしれません。Heartbeat monitoring が得意なのは一つの狭い問いです。期待した job が、時間内に成功完了を報告したかどうかです。内容検証、restore test、business-level check は別の control として残ります。</p>
+<p>Alert には行動に必要な context も持たせたいです。役立つ alert は job 名、期待時間、last success、次に調べる場所を示します。何が遅れているかを知るためだけに、複数 dashboard を探させるべきではありません。</p>
+<p>最後に、監視経路そのものを test する必要があります。安全な test では heartbeat を一時的に止めるか、専用 test monitor を使えます。目的は、不在によって alert が発生し、想定した宛先に届くことを証明することです。設定済みの rule を見るだけでは、実行したことになりません。</p>
+<h3>まとめ</h3>
+<p>定期ジョブは、まったく実行されないことで、error を出さずに失敗できます。だからこそ検知すべき signal は「不在」です。</p>
+<p>Dead man’s switch は、完了 heartbeat と独立した deadline でこの問題を解決します。検証済みの処理後に heartbeat を置き、最後の成功完了を追跡し、遅延または欠落時に alert を出します。問いは狭く、正直に保ちます。</p>
+<p>より広い教訓は単純です。監視は、期待した結果が起きたことを証明すべきです。静かな system が自動的に健康とは限りません。</p>
+<h3>今後</h3>
+<p>定期 script 向けに、小さな共通 heartbeat wrapper を試したいです。Job identity、start time、completion time、短い result label を記録します。成功 signal は引き続き最後にだけ送ります。</p>
+<p>また、scheduled job を dependency ごとに確認したいです。同じ host、scheduler、notification channel を共有する job をまとめれば、共通 failure domain が見えやすくなり、独立 monitor の効果が高い場所を判断できます。</p>
+<h3>参考</h3>
+<p><strong>Google Site Reliability Engineering</strong></p>
+<p>Monitoring Distributed Systems: <a href="https://sre.google/sre-book/monitoring-distributed-systems/">https://sre.google/sre-book/monitoring-distributed-systems/</a></p>
+<p><strong>systemd Documentation</strong></p>
+<p>systemd.timer: <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html">https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

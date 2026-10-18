@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Dead Man’s Switches: Monitoring Jobs That Fail by Not Running</title></head>
+<body>
+<h1>Dead Man’s Switches: Monitoring Jobs That Fail by Not Running</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/en-cover.png" alt="Dead Man’s Switches: Monitoring Jobs That Fail by Not Running"></figure>
+<p>In this blog, I will explain how a simple heartbeat can reveal a scheduled job that failed by never running.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>The invisible failure</li>
+<li>Overview</li>
+<li>Designing the heartbeat</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>Scheduled jobs are easy to forget when they work. A report appears each morning. A backup runs each night. A cleanup task removes old data. The scheduler becomes part of the background.</p>
+<p>This creates a special monitoring problem. A normal error can produce a stack trace, a failed status, or a log entry. But what happens when the scheduler never starts the process? There may be no process, no log, and no error event. The failure is absence.</p>
+<p>A dead man’s switch handles this case. The job sends a success signal only after it finishes. An independent monitor expects that signal within a defined window. If the signal does not arrive, the monitor raises an alert.</p>
+<p>The important idea is not the network request itself. The important idea is to monitor an expected outcome from outside the job. “No error was reported” is weak evidence. “The expected completion signal arrived on time” is much stronger.</p>
+<h3>The Invisible Failure</h3>
+<p>Many monitoring systems begin with failure events. The application catches an exception and reports it. The scheduler records a non-zero exit code. A log rule searches for words such as failed or timeout. These checks help, but they all assume that something ran far enough to report a problem.</p>
+<p>A scheduled job can disappear before that point. Its schedule may be disabled. A machine may be offline. A configuration may be malformed. A credential required to start the runtime may be unavailable. The scheduler itself may stop. In each case, the job cannot report its own failure because it never gets control.</p>
+<p>This is why a quiet dashboard can be misleading. Silence can mean healthy. It can also mean that the entire reporting path is dead. Monitoring needs a question with a deadline: “Did this specific job complete when I expected it to complete?”</p>
+<p>That question turns absence into a measurable state. The monitor stores the last successful heartbeat. It compares that time with the expected schedule and an allowed delay. The result can be fresh, late, or missing. A late or missing signal is now an event that another system can see.</p>
+<h3>Overview</h3>
+<p>A basic flow has five parts. A scheduler triggers the job. The job starts. It performs its real work. It verifies that the work succeeded. Only then does it send the completion heartbeat.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/en-diagram-1.png" alt="A scheduled job sends a heartbeat only after successful work"></figure>
+<p><em>The success heartbeat belongs at the end of the job, after the real work has been verified.</em></p>
+<p>Placing the heartbeat at the start answers the wrong question. It proves that the process began, but not that it completed. A job can send an early signal and then fail halfway through. The monitor stays green while the useful result is missing.</p>
+<p>The signal should also identify the job and its environment clearly. A daily report and a weekly cleanup should not share one monitor. Their schedules, deadlines, and response procedures differ. Separate identities make the last-success time meaningful.</p>
+<p>The monitor must be independent enough to notice the failure. If the job and its heartbeat checker use the same scheduler, host, and notification path, one outage can disable both. Full independence is not always practical, but avoiding one obvious shared failure domain is valuable.</p>
+<h3>Designing the Heartbeat</h3>
+<p><strong>Define the expected window</strong></p>
+<p>A schedule alone is not a deadline. A job planned for the top of the hour may normally finish several minutes later. The monitor needs an expected completion window that includes ordinary runtime and a small allowance for delays. The allowance should reflect observed behavior, not an arbitrary large number that hides failures.</p>
+<p>For frequent jobs, the monitor can alert after one or more missed intervals. For a daily job, it can wait until the normal completion window closes. The useful rule is simple: alert when the missing result matters, but before the next consumer depends on it.</p>
+<p><strong>Signal success, not activity</strong></p>
+<p>The heartbeat should be emitted after all required steps succeed. If the job creates a file, verify that the file exists and is usable. If it writes data, verify the relevant write. If it sends a report, treat delivery according to the job’s real contract. The final signal should mean that the promised outcome happened, not merely that the script reached its last line.</p>
+<p><strong>Keep failure visible</strong></p>
+<p>Do not send the same success heartbeat from a broad cleanup block that runs after both success and failure. That pattern makes every execution look healthy. A failure path can send separate diagnostic information, but it must not refresh the last-success clock.</p>
+<p><strong>Make the signal repeat-safe</strong></p>
+<p>Network retries can send the same heartbeat more than once. The monitor should treat repeated signals for the same completion as harmless. The state that matters is the newest valid success time, not a count that can be inflated by retries.</p>
+<h3>Discussion</h3>
+<p>An external checker evaluates the other half of the design. It knows when a completion should arrive. It records the newest heartbeat. When the allowed window closes, it decides whether the state is fresh or late and alerts through a path that an operator will notice.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-18-con-09-cron-heartbeat/en-diagram-2.png" alt="An independent monitor checks whether a heartbeat arrived on time"></figure>
+<p><em>The monitor converts a missing completion signal into an explicit late state and an alert.</em></p>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>It detects jobs that never start.</li>
+<li>It measures freshness instead of searching only for errors.</li>
+<li>It gives each scheduled outcome a clear deadline.</li>
+<li>It is simple enough to add to scripts, containers, and timer-based services.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>A bad deadline can create noise or delay detection.</li>
+<li>A heartbeat can still lie if it is sent before the outcome is verified.</li>
+<li>The checker and alert channel become infrastructure that also needs testing.</li>
+<li>A green heartbeat confirms completion, but not necessarily data quality.</li>
+</ul>
+<p>The last drawback matters. A report can finish on time and still contain wrong data. A backup can complete but be impossible to restore. Heartbeat monitoring answers one narrow question well: did the expected job report successful completion on time? Content validation, restore tests, and business-level checks remain separate controls.</p>
+<p>I also want the alert to carry enough context for action. A useful alert names the job, the expected window, the last success time, and the next place to inspect. It should not require someone to search several dashboards just to learn what is late.</p>
+<p>Finally, the monitoring path needs a test. A safe test can temporarily withhold a heartbeat or use a dedicated test monitor. The goal is to prove that absence creates an alert and that the alert reaches the intended destination. Looking at a configured rule is not the same as exercising it.</p>
+<h3>Conclusion</h3>
+<p>A scheduled job can fail without producing an error because it may never run at all. That makes absence the signal we need to detect.</p>
+<p>A dead man’s switch solves this with a completion heartbeat and an independent deadline. Put the heartbeat after verified work. Track the last successful completion. Alert when the signal is late or missing. Keep the question narrow and honest.</p>
+<p>The broader lesson is simple: monitoring should prove that an expected result happened. A quiet system is not automatically a healthy system.</p>
+<h3>Other</h3>
+<p>I want to try a small shared heartbeat wrapper for scheduled scripts. It would record a job identity, start time, completion time, and a short result label. The success signal would still be sent only at the end.</p>
+<p>I also want to review scheduled jobs by dependency. Jobs that share one host, scheduler, or notification channel should be marked together. That view would make common failure domains easier to see and would help decide where an independent monitor adds the most value.</p>
+<h3>Reference</h3>
+<p><strong>Google Site Reliability Engineering</strong></p>
+<p>Monitoring Distributed Systems: <a href="https://sre.google/sre-book/monitoring-distributed-systems/">https://sre.google/sre-book/monitoring-distributed-systems/</a></p>
+<p><strong>systemd Documentation</strong></p>
+<p>systemd.timer: <a href="https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html">https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
