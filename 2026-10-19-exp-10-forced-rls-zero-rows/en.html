@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Row Level Security Returned Zero Rows and No Error</title></head>
+<body>
+<h1>Row Level Security Returned Zero Rows and No Error</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-19-exp-10-forced-rls-zero-rows/en-cover.png" alt="Row Level Security Returned Zero Rows and No Error"></figure>
+<p>In this blog, I will describe how a background job passed every run while Row Level Security quietly hid all of its work.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits</li>
+<li>Drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I worked on a multi-tenant SaaS that used Postgres Row Level Security, usually called RLS. The database stored rows for more than one tenant. A policy decided which rows a database session was allowed to see.</p>
+<p>The application also used <strong>FORCE ROW LEVEL SECURITY</strong>. This matters because ordinary RLS has exceptions. Table owners normally bypass row security. FORCE makes the table owner obey the policies too. It reduces the chance that an application connection can accidentally read every tenant’s data.</p>
+<p>A background job connected to the database without setting its tenant context. Its queries did not fail. They returned zero rows. The job interpreted the empty result as “nothing to do,” completed normally, and did the same thing on every run.</p>
+<p>This is an uncomfortable kind of failure. There was no database exception to catch. There was no permission-denied message. The security control worked as designed: without a valid tenant identity, the session could not see tenant rows. The application was the part that misunderstood the result.</p>
+<h3>Overview</h3>
+<p>RLS adds an implicit filter to a query. A policy can compare a row’s tenant identifier with a value stored in the current database session. When the values match, the row is visible. When the session has no tenant context, the policy expression does not match.</p>
+<p>That fail-closed behavior is useful. A missing security context should not reveal all rows. However, “safe” and “operationally correct” are different questions. A background job that expects tenant data must notice when its security context is missing.</p>
+<ul>
+<li>The scheduler starts the job.</li>
+<li>The job opens a database transaction.</li>
+<li>The transaction should set the intended tenant context.</li>
+<li>Queries then run under that context.</li>
+<li>The job should treat an unexpected empty result as suspicious.</li>
+</ul>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-19-exp-10-forced-rls-zero-rows/en-diagram-1.png" alt="How missing tenant context became a successful empty job"></figure>
+<p><em>The failure and fix: a missing tenant context produced zero visible rows, so the transaction now sets the context explicitly before querying.</em></p>
+<h3>Demo</h3>
+<p>Consider a worker that processes records for one tenant. The worker receives a tenant identifier, opens a transaction, selects pending rows, performs its work, and commits.</p>
+<p>In the broken path, one step was absent. The job opened its connection and queried immediately. FORCE RLS applied the policy to that connection, even though the connection used the table owner. Because the transaction had no tenant context, no rows satisfied the policy.</p>
+<p>The SQL still executed successfully. From Postgres’s point of view, returning an empty result was valid. From the worker’s point of view, the result looked exactly like a tenant that had no pending records. The job therefore finished without an error.</p>
+<blockquote><p>A zero-row result can mean “there is no work,” or it can mean “this session is not allowed to see the work.”</p></blockquote>
+<p>The fix was to set the tenant context explicitly for each transaction. The placement is important. Connection pools reuse sessions, so a tenant value must not be treated as an informal global setting. The transaction establishes the context, runs the tenant queries, and then ends.</p>
+<p>The job also needs an application-level signal when data is expected. The implemented fix included making jobs that expect data assert a non-zero count or log the tenant context they ran under. This turns an empty result into information that can be investigated instead of a silent success.</p>
+<p>This does not mean every zero-row result should fail. Some jobs legitimately have no work. The assertion belongs where the job’s contract says data must exist. In other cases, logging the effective tenant context gives an operator enough evidence to distinguish an empty queue from a missing identity.</p>
+<h3>Discussion</h3>
+<p><strong>Security filters are not ordinary errors</strong></p>
+<p>An authorization policy often removes data instead of throwing an exception. This is safer than returning rows to the wrong tenant. It also means error monitoring alone cannot prove the job is healthy. The query can be valid, fast, and empty for the wrong reason.</p>
+<p>I should therefore define expected outcomes at the application layer. If a reconciliation job is created for a known tenant and a known set of records, zero may violate that expectation. If a polling job checks for optional work, zero may be normal. The database cannot infer that distinction from SQL alone.</p>
+<p><strong>Context should follow the transaction</strong></p>
+<p>Tenant context is part of the authorization decision. It should be established near the transaction that depends on it. This keeps the identity and the queries in one visible scope.</p>
+<p>A better interface would make it difficult to run tenant SQL before context is set. For example, the worker could accept a tenant identifier and expose database operations only inside a transaction callback. That is a design recommendation, not something this incident proved was already built.</p>
+<p><strong>FORCE RLS exposes hidden assumptions</strong></p>
+<p>Without FORCE, code running as the table owner may appear to work because that role normally bypasses RLS. That success can hide a missing-context bug. The same code may behave differently when it later runs under a restricted role.</p>
+<p>FORCE removes that accidental privilege for the owner. In this case, it made the security boundary consistent, but the worker had not been designed to supply the context the policy required. The right response was not to weaken the policy. It was to repair the worker’s transaction.</p>
+<p><strong>Test both isolation and expected visibility</strong></p>
+<p>RLS tests often focus on the most important negative case: tenant A must not read tenant B’s rows. That test is necessary, but it is incomplete. The positive case matters too: tenant A should see the rows that belong to tenant A after the correct context is set.</p>
+<p>I also want a missing-context case. It should confirm that no tenant rows are exposed and that a job expecting data does not report a normal success. These tests describe both sides of fail-closed behavior.</p>
+<h3>Benefits</h3>
+<p>Explicit per-transaction context keeps the tenant identity close to the queries it authorizes. It works with FORCE RLS instead of relying on table-owner privileges. It also reduces ambiguity when a pooled connection is reused.</p>
+<p>An assertion or context log makes the job easier to diagnose. Operators can see which tenant context was active, or detect that an expected data set was empty. That is more useful than a generic successful run.</p>
+<p>The security posture remains fail closed. Missing context still reveals no rows. The change adds operational visibility without turning a safety mechanism into a bypass.</p>
+<h3>Drawbacks</h3>
+<p>The application has more responsibility. Every tenant-aware transaction must establish the right context, and tests must cover that setup. A forgotten step can still produce an empty result if the surrounding job has no expectation check.</p>
+<p>Non-zero assertions also need care. They are appropriate only when the job truly expects records. Applying them to optional work would create false alarms. The contract for each job must say whether empty is normal, suspicious, or impossible.</p>
+<p>A more structured database wrapper could reduce mistakes, but it would add design and migration work. I want to evaluate that approach rather than claim it is already part of the system.</p>
+<h3>Conclusion</h3>
+<p>The background job did not crash. Postgres did not reject its SQL. FORCE Row Level Security correctly hid tenant rows from a transaction that had no tenant context, and the worker mistook zero rows for zero work.</p>
+<p>The fix was to set tenant context explicitly in every transaction. Jobs that expect data now need to assert a non-zero count or log the tenant context they used.</p>
+<p>My main lesson is simple: security features designed to fail closed can fail silently at the application layer. Empty results deserve a meaning. A successful query is not proof that the job saw the data it was supposed to process.</p>
+<h3>Other</h3>
+<p>I want to make tenant context harder to omit by designing a transaction helper that requires the tenant identifier before it exposes tenant queries. I also want tests for three cases: the correct tenant sees its rows, another tenant cannot see them, and missing context cannot produce a misleading successful job.</p>
+<p>I also want job dashboards to separate “completed with work,” “completed with no work,” and “completed with an unexpected empty result.” That would make the application contract visible without weakening RLS.</p>
+<h3>Reference</h3>
+<p><strong>Project source</strong></p>
+<p>This experience is based on sanitized project notes. No client names or internal systems are included.</p>
+<p><strong>PostgreSQL documentation</strong></p>
+<p>Row Security Policies: <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">https://www.postgresql.org/docs/current/ddl-rowsecurity.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

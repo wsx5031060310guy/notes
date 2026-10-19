@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>Row Level Security 沒報錯，卻回傳 0 筆資料</title></head>
+<body>
+<h1>Row Level Security 沒報錯，卻回傳 0 筆資料</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-19-exp-10-forced-rls-zero-rows/zh-cover.png" alt="Row Level Security 沒報錯，卻回傳 0 筆資料"></figure>
+<p>在這篇文章中，我要說明 Row Level Security 如何靜靜隱藏所有待處理資料，讓背景工作每次都被判定為成功。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>背景</li><li>概觀</li><li>示範</li><li>討論</li><li>優點</li><li>缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>背景</h3>
+<p>我曾處理一個使用 Postgres Row Level Security，也就是 RLS 的多租戶 SaaS。資料庫存放多個租戶的資料列，再由政策決定目前資料庫 session 可以看到哪些資料。</p>
+<p>這個應用程式也啟用了 <strong>FORCE ROW LEVEL SECURITY</strong>。一般情況下，資料表擁有者會略過 RLS。FORCE 會讓擁有者也必須遵守政策，降低應用程式連線意外讀到所有租戶資料的風險。</p>
+<p>有一個背景工作連上資料庫時，沒有設定租戶 context。查詢沒有失敗，也沒有任何錯誤，只回傳 0 筆資料。工作把空結果解讀成「沒有事情要做」，正常結束，之後每次執行都重複同樣的情況。</p>
+<p>這是一種很難察覺的失敗。沒有資料庫例外，也沒有權限不足訊息。安全控制確實按照設計運作：沒有有效租戶身分的 session 看不到租戶資料。誤解結果的是應用程式。</p>
+<h3>概觀</h3>
+<p>RLS 會替查詢加入隱含的篩選條件。政策可以比較資料列的租戶識別碼與目前 session 內的值。兩者相符時，資料列才看得到。session 沒有租戶 context 時，政策條件就不會成立。</p>
+<p>這種 fail-closed 行為很有價值。缺少安全 context 時，不應該把所有資料都交出去。不過，「安全」與「作業正確」是兩個不同問題。預期要處理租戶資料的背景工作，必須辨認出安全 context 已遺失。</p>
+<ul><li>排程器啟動背景工作。</li><li>工作開啟資料庫 transaction。</li><li>transaction 應設定目標租戶 context。</li><li>查詢在該 context 下執行。</li><li>工作應把非預期的空結果視為可疑。</li></ul>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-19-exp-10-forced-rls-zero-rows/zh-diagram-1.png" alt="租戶 context 遺失如何變成空白但成功的背景工作"></figure>
+<p><em>失敗與修正：缺少租戶 context 導致可見資料為 0 筆，因此要在查詢前，於每個 transaction 明確設定 context。</em></p>
+<h3>示範</h3>
+<p>假設有一個 worker 專門處理某個租戶的紀錄。它收到租戶識別碼，開啟 transaction，選出待處理資料，完成工作後 commit。</p>
+<p>發生問題的流程少了一個步驟。工作建立連線後立刻查詢。FORCE RLS 讓政策同樣套用到資料表擁有者的連線。因為 transaction 裡沒有租戶 context，沒有任何資料列能通過政策。</p>
+<p>SQL 仍然正常執行。對 Postgres 來說，回傳空結果完全合法。對 worker 來說，它看起來就像該租戶沒有待處理紀錄。因此工作沒有發生錯誤，直接結束。</p>
+<blockquote><p>0 筆資料可能表示「真的沒有工作」，也可能表示「目前 session 沒有權限看到工作」。</p></blockquote>
+<p>修正方式是在每個 transaction 明確設定租戶 context。設定位置很重要。連線池會重複使用 session，因此租戶值不應被當成模糊的全域設定。transaction 先建立 context，再執行租戶查詢，最後結束。</p>
+<p>預期應該有資料的工作，也需要應用程式層的訊號。這次實作的修正包含：預期有資料的工作要確認筆數不為 0，或記錄執行時使用的租戶 context。這會把空結果從無聲成功，轉成可以調查的資訊。</p>
+<p>這不代表所有 0 筆結果都應該失敗。有些工作確實可能沒有事情要做。只有當工作契約明確表示資料必須存在時，才適合使用非零斷言。其他情況可以記錄實際 context，讓維運人員分辨空佇列與身分遺失。</p>
+<h3>討論</h3>
+<p><strong>安全篩選不是一般錯誤</strong></p>
+<p>授權政策常以隱藏資料取代丟出例外。這比把錯誤租戶的資料回傳出去安全，卻也代表只監控錯誤無法證明工作健康。查詢可以合法、快速，而且因錯誤原因而得到空結果。</p>
+<p>因此，我應在應用程式層定義預期結果。如果對帳工作針對已知租戶及已知紀錄建立，0 筆可能違反預期。如果輪詢工作只是在找可有可無的新任務，0 筆可能很正常。資料庫無法只看 SQL 就判斷兩者差異。</p>
+<p><strong>context 應跟著 transaction</strong></p>
+<p>租戶 context 是授權判斷的一部分，應該在依賴它的 transaction 附近建立。如此一來，身分與查詢位於同一個清楚的範圍。</p>
+<p>更好的介面會讓程式難以在設定 context 前執行租戶 SQL。例如，worker 必須先接收租戶識別碼，並且只在 transaction callback 內提供資料庫操作。這是建議的設計，不是這次事件已完成的功能。</p>
+<p><strong>FORCE RLS 會揭露隱藏假設</strong></p>
+<p>如果沒有 FORCE，以資料表擁有者身分執行的程式可能因略過 RLS 而看似正常。這個成功會掩蓋 context 遺失。相同程式之後改用受限制角色時，行為可能完全不同。</p>
+<p>FORCE 移除了擁有者的意外特權。這次安全邊界維持一致，但 worker 沒有提供政策要求的 context。正確做法不是削弱政策，而是修正 worker 的 transaction。</p>
+<p><strong>隔離與正確可見性都要測試</strong></p>
+<p>RLS 測試常聚焦在最重要的負面案例：租戶 A 不得讀取租戶 B 的資料。這個測試必要，但不完整。正面案例也同樣重要：設定正確 context 後，租戶 A 應該能看到自己的資料。</p>
+<p>我也想加入缺少 context 的案例。它應證明租戶資料不會外洩，同時確保預期有資料的工作不會回報一般成功。這些測試描述 fail-closed 行為的兩面。</p>
+<h3>優點</h3>
+<p>每個 transaction 都明確設定 context，可以讓租戶身分靠近實際授權的查詢。它不依賴資料表擁有者特權，而是與 FORCE RLS 一起運作，也能減少連線池重複使用 session 時的模糊空間。</p>
+<p>斷言或 context 紀錄讓工作更容易診斷。維運人員可以看到執行時的租戶身分，也能發現預期存在的資料集為空。這比一般的成功狀態更有用。</p>
+<p>安全姿態仍維持 fail closed。缺少 context 時不會透露任何資料。修正增加了作業可見性，並沒有替安全機制增加後門。</p>
+<h3>缺點</h3>
+<p>應用程式必須負起更多責任。每個租戶相關 transaction 都要建立正確 context，測試也要涵蓋這個設定。如果周圍的工作沒有預期值檢查，遺漏設定仍可能只得到空結果。</p>
+<p>非零斷言也需要謹慎使用。只有工作確實預期有紀錄時才適合。若套用到選擇性工作，就會產生誤報。每種工作都要定義「空」究竟是正常、可疑或不可能。</p>
+<p>結構化的資料庫包裝層可以減少錯誤，但會增加設計與遷移成本。我想評估這個方向，而不是宣稱系統已經具備它。</p>
+<h3>結論</h3>
+<p>背景工作沒有當機，Postgres 也沒有拒絕 SQL。FORCE Row Level Security 正確地向缺少租戶 context 的 transaction 隱藏租戶資料，而 worker 把 0 筆資料誤解成 0 件工作。</p>
+<p>修正方式是在每個 transaction 明確設定租戶 context。對於預期有資料的工作，還要確認筆數不為 0，或記錄使用的租戶 context。</p>
+<p>我得到的主要教訓很簡單：設計為 fail closed 的安全功能，到了應用程式層仍可能靜靜失敗。空結果必須有明確意義。查詢成功不代表工作看到了它原本應該處理的資料。</p>
+<h3>其他</h3>
+<p>我想設計一個 transaction helper，要求先提供租戶識別碼，才允許使用租戶查詢。我也想建立三種測試：正確租戶看得到自己的資料、其他租戶看不到，以及缺少 context 時不能產生誤導性的成功。</p>
+<p>我也想在工作儀表板區分「有處理資料並完成」、「沒有資料並完成」與「非預期空結果並完成」。這能在不削弱 RLS 的前提下，讓應用程式契約清楚可見。</p>
+<h3>參考</h3>
+<p><strong>專案來源</strong></p>
+<p>這次經驗來自匿名化的專案筆記，不包含客戶名稱或內部系統資訊。</p>
+<p><strong>PostgreSQL 官方文件</strong></p>
+<p>Row Security Policies: <a href="https://www.postgresql.org/docs/current/ddl-rowsecurity.html">https://www.postgresql.org/docs/current/ddl-rowsecurity.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
