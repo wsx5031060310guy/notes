@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><title>先做可解釋的配對：何時關鍵字比向量更適合</title></head><body>
+<h1>先做可解釋的配對：何時關鍵字比向量更適合</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/zh-cover.png" alt="先做可解釋的配對：何時關鍵字比向量更適合"></figure>
+<p>這篇文章中，我會說明為什麼透明的關鍵字配對器，可能是搜尋系統第一版的正確選擇。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>前言</li><li>概觀</li><li>可解釋配對如何運作</li><li>優點</li><li>缺點</li><li>用真實語料衡量</li><li>結合規則與向量</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>前言</h3>
+<p>Semantic search 很吸引人。即使兩段文字沒有共用相同詞彙，它仍能找出相關概念。Embedding 把文字轉成向量，nearest-neighbor query 則取回語意接近的項目。這是實用的技術。</p>
+<p>不過，實用的技術不一定適合當第一版。產品團隊可能需要知道項目為什麼配對成功。審查者可能必須核准每一條規則。語料庫也可能小到仍可人工檢查。假陽性的成本有時比漏掉結果更高。在這些情境中，關鍵字與明確規則可以提供向量預設沒有的東西：看得見的證據。</p>
+<p>這不是反對 Embedding，而是導入順序的選擇。先採用能衡量錯誤的最簡單系統。等證據顯示 semantic retrieval 應解決哪個問題，再把它加入。</p>
+<h3>概觀</h3>
+<p>規則式配對器有三種基本輸入：文件、規則集合，以及配對的定義。規則可以是單字、片語、必要組合或排除條件。輸出不應只有分數，也應包含造成該結果的確切證據。</p>
+<p>例如，結果可以顯示：標題出現兩個已核准片語，因此配對成功。另一個結果可以顯示：因為出現排除片語，所以被拒絕。即使不懂向量距離，人也能直接讀懂這種說明。</p>
+<p>這會改變開發迴圈。配對錯誤時，審查者能指出特定規則。相關文件遺漏時，審查者能辨認規則尚未涵蓋的用語。修正範圍很小，可以測試，也容易討論。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/zh-diagram-1.png" alt="文件經過可見規則後產生證據並接受審查的流程"></figure>
+<p><em>透明的第一階段配對器會同時回傳結果與理由。</em></p>
+<h3>可解釋配對如何運作</h3>
+<p><strong>配對前先正規化</strong></p>
+<p>細微的文字差異可能讓明顯的配對失敗。大小寫、標點、空白與常見字形差異都應一致處理。正規化必須可以預測。若正規化改變語意，就會產生另一類看不見的錯誤。</p>
+<p><strong>單字有歧義時，優先使用片語</strong></p>
+<p>範圍太廣的單字常出現在多個無關領域。片語能補上情境。規則也能要求兩個詞必須同時出現。這比 semantic model 缺少彈性，但邊界很清楚。團隊知道配對器能辨認什麼，也知道它不能辨認什麼。</p>
+<p><strong>分開納入與排除條件</strong></p>
+<p>納入條件說明什麼可以成為候選項目。排除條件則讓原本看似合理的配對失效。分開管理能讓審查更容易，也可避免很長的運算式變成沒有人理解的隱藏程式。</p>
+<p><strong>把證據當成資料回傳</strong></p>
+<p>結果應包含 rule identifier、命中的文字，以及發生命中的欄位。不要等到最後只剩分數時才重建理由。若證據與結果一起保存，即使規則集合之後改變，審查者仍能稽核過去的判斷。</p>
+<h3>優點</h3>
+<p>第一個優點是容易除錯。錯誤結果有看得見的原因。團隊能用相同文件與規則集合重現，不必猜測 dense representation 的哪個部分影響排序。</p>
+<p>第二個優點是控制力。Product owner 可以替敏感分類定義高精準片語。Engineer 可以在發布前測試新增內容。審查者可以拒絕範圍太廣的規則。當產品必須說明為何顯示某個項目時，這一點尤其重要。</p>
+<p>第三個優點是清楚的 baseline。如果之後的 Embedding 系統在選定評估集上無法超越規則系統，額外複雜度就還沒有證明其價值。Baseline 能把「semantic search 感覺比較聰明」轉成可衡量的主張。</p>
+<p>第四個優點是營運複雜度較低。規則通常能在既有應用程式與資料庫中執行。初期可能不需要 embedding job、vector index、model dependency 或 re-embedding workflow。</p>
+<h3>缺點</h3>
+<p>關鍵字不會自然理解改寫。它會漏掉同義詞，也會漏掉使用預期外詞彙的說明。領域改變時，規則也需要維護。如果沒有人負責結構，規則集合可能逐漸變成大量例外。</p>
+<p>規則可能在一種語言中表現良好，換到另一種語言就失效。Tokenization 與單字邊界因語言而異。使用者採用縮寫、不同拼法或混合語言時，完全相符的片語很脆弱。</p>
+<p>涵蓋率也是風險。高 precision 可能帶來低 recall。一份乾淨的結果清單看起來很好，但相關文件可能仍不可見。因此，關鍵字系統仍需要評估。可解釋不代表正確，只代表錯誤更容易被看見。</p>
+<h3>用真實語料衡量</h3>
+<p>我會用固定且具代表性的真實文件集合評估每次變更。集合應包含已知的正例、負例，以及難以判斷的邊界案例，不能只收錄目前規則已經能處理的例子。</p>
+<p>每次修改規則，我都想查看前後比較。哪些文件變成新配對？哪些文件消失？每一筆改變是由什麼證據造成？數量很有用，但只要語料庫仍可管理，逐行檢查差異會更有價值。</p>
+<p>Precision 與 recall 描述不同的失敗。Precision 問的是回傳項目中有多少真正相關。Recall 問的是所有相關項目中找到了多少。適當平衡取決於 workflow。探索工具可以容忍額外候選項目；自動執行動作則可能要求高得多的 precision。</p>
+<p>評估集也必須謹慎演進。團隊找到真實的 false positive 或 false negative 時，應把案例加入 regression example。否則未來修改規則後，同一個錯誤可能再次出現。</p>
+<h3>結合規則與向量</h3>
+<p>選擇不必永遠是二選一。規則可以處理嚴格限制，vector search 則可擴大 recall。系統能先用明確 filter 套用 permission、date、language 與 required category，再依 semantic similarity 排列剩餘候選項目。</p>
+<p>另一種設計採用兩個獨立的 candidate generator。一個回傳 keyword match，另一個回傳 vector neighbor。後續階段再合併、去除重複並排序。介面仍能顯示 keyword evidence，並清楚標記只靠 semantic similarity 找到的結果。</p>
+<p>這種 hybrid design 保留了一個重要差異：hard requirement 不等於 relevance hint。Similarity score 不應越過 permission boundary 或必要 business rule。明確政策應放在明確邏輯中。</p>
+<p>PostgreSQL 提供文件配對用的 full text search。pgvector extension 則替向量加入 exact 與 approximate nearest-neighbor search。讓兩種 retrieval 靠近同一份資料，有時能簡化 hybrid design；但正確架構仍取決於語料庫與 workload。</p>
+<h3>結論</h3>
+<p>Embedding 很強大，但它應解決已觀察到的搜尋問題。透明的關鍵字配對器常是很好的第一版，因為它會揭露證據、支援直接審查，並建立可衡量的 baseline。</p>
+<p>重點不是宣稱規則很聰明，而是讓限制可見。用真實文件衡量漏掉與產生雜訊的結果，接著只在能改善衡量結果的地方加入 semantic retrieval。</p>
+<h3>其他</h3>
+<p>我想嘗試一個 hybrid review screen，把 keyword evidence 放在 semantic candidate 旁邊。我也想記錄每個項目是由哪個 candidate generator 找到，並讓審查者標記 false positive 與 false negative。這些標記可以同時引導規則修改與後續 retrieval experiment。</p>
+<p>更好的設計會一起版本化規則與評估語料。每次 release 都能在部署前顯示精確的結果差異，讓搜尋變更像程式碼變更一樣可以審查。</p>
+<h3>參考</h3>
+<p><strong>PostgreSQL</strong></p>
+<p>Full Text Search: <a href="https://www.postgresql.org/docs/current/textsearch.html">https://www.postgresql.org/docs/current/textsearch.html</a></p>
+<p><strong>pgvector</strong></p>
+<p>Postgres 的開源 vector similarity search: <a href="https://github.com/pgvector/pgvector">https://github.com/pgvector/pgvector</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body></html>

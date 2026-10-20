@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Explainable Matching Before Embeddings: When Keywords Beat Vectors</title></head><body>
+<h1>Explainable Matching Before Embeddings: When Keywords Beat Vectors</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/en-cover.png" alt="Explainable Matching Before Embeddings: When Keywords Beat Vectors"></figure>
+<p>In this blog, I will explain why a transparent keyword matcher can be the right first search system.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Introduction</li><li>Overview</li><li>How explainable matching works</li><li>Benefits</li><li>Drawbacks</li><li>Measuring with a real corpus</li><li>Combining rules and vectors</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Introduction</h3>
+<p>Semantic search is attractive. It can find related ideas even when two texts do not share the same words. Embeddings turn text into vectors, and a nearest-neighbor query can retrieve items that are close in meaning. This is useful technology.</p>
+<p>But useful technology is not always the correct first version. A product team may need to know why an item matched. A reviewer may need to approve every rule. The corpus may be small enough to inspect. A false positive may be more costly than a missed result. In those cases, keywords and explicit rules can give the team something vectors do not give by default: visible evidence.</p>
+<p>I do not see this as an argument against embeddings. I see it as an ordering decision. Start with the simplest system that lets you measure errors. Add semantic retrieval when the evidence shows what it should solve.</p>
+<h3>Overview</h3>
+<p>A rule-based matcher has three basic inputs: a document, a set of rules, and a definition of a match. A rule may be a word, a phrase, a required combination, or an exclusion. The output should not be only a score. It should include the exact evidence that caused the result.</p>
+<p>For example, a result can say that it matched because two approved phrases appeared in the title. Another result can say it was rejected because an exclusion phrase was present. A human can read that explanation without knowing anything about vector distance.</p>
+<p>This changes the development loop. When a match is wrong, the reviewer can point to a specific rule. When a relevant document is missing, the reviewer can identify the language that the rules did not cover. The correction is small, testable, and easy to discuss.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/en-diagram-1.png" alt="Flow from a document through visible matching rules to evidence and review"></figure>
+<p><em>A transparent first-stage matcher returns both the result and the reason for it.</em></p>
+<h3>How Explainable Matching Works</h3>
+<p><strong>Normalize before matching</strong></p>
+<p>Small text differences can hide an obvious match. Case, punctuation, spacing, and common character variants should be handled consistently. The normalization step must be predictable. If normalization changes the meaning, it creates a new class of invisible errors.</p>
+<p><strong>Prefer phrases when single words are ambiguous</strong></p>
+<p>A broad word often appears in several unrelated domains. A phrase adds context. A rule can also require two terms to appear together. This is less flexible than a semantic model, but its boundary is clear. The team knows what the matcher can and cannot recognize.</p>
+<p><strong>Keep inclusions and exclusions separate</strong></p>
+<p>An inclusion says what may qualify. An exclusion says what invalidates an otherwise plausible match. Keeping them separate makes review easier. It also prevents a long expression from becoming a hidden program that nobody understands.</p>
+<p><strong>Return evidence as data</strong></p>
+<p>The result should contain rule identifiers, matched text, and the field where the match occurred. Evidence should not be reconstructed later from a final score. If the evidence is stored with the result, reviewers can audit old decisions even after the rule set changes.</p>
+<h3>Benefits</h3>
+<p>The first benefit is debuggability. A wrong result has a visible reason. The team can reproduce it with the same document and rule set. There is no need to guess which part of a dense representation influenced the ranking.</p>
+<p>The second benefit is control. Product owners can define high-precision phrases for sensitive categories. Engineers can test additions before release. Reviewers can reject a rule that is too broad. This is especially valuable when the product must justify why an item was shown.</p>
+<p>The third benefit is a clean baseline. If a later embedding system cannot beat the rule system on the chosen evaluation set, the added complexity has not earned its place. A baseline turns “semantic search feels smarter” into a measurable claim.</p>
+<p>The fourth benefit is low operational complexity. Rules can often run in the same application and database that already hold the documents. There may be no embedding job, vector index, model dependency, or re-embedding workflow at the start.</p>
+<h3>Drawbacks</h3>
+<p>Keywords do not naturally understand paraphrases. They miss synonyms and descriptions that use unexpected vocabulary. They also require maintenance as the domain changes. A rule set can grow into a collection of exceptions if nobody owns its structure.</p>
+<p>Rules may work well in one language and poorly in another. Tokenization and word boundaries vary. Exact phrases can be fragile when users write abbreviations, spelling variants, or mixed languages.</p>
+<p>Coverage is another risk. High precision can create low recall. A clean list of results may look impressive while relevant documents remain invisible. That is why a keyword system still needs evaluation. Explainability does not make it correct; it makes its errors easier to see.</p>
+<h3>Measuring with a Real Corpus</h3>
+<p>I would evaluate every change against a fixed, representative collection of real documents. The collection should include known positives, known negatives, and difficult borderline cases. It should not contain only examples that the current rules already handle.</p>
+<p>For each rule change, I want a before-and-after comparison. Which documents became newly matched? Which disappeared? For every changed result, what evidence caused the change? Counts are useful, but a line-by-line review of the differences is more useful while the corpus remains manageable.</p>
+<p>Precision and recall describe different failures. Precision asks how many returned items are relevant. Recall asks how many relevant items were found. The right balance depends on the workflow. A discovery tool may tolerate extra candidates. An automated action may demand much higher precision.</p>
+<p>The evaluation set must also evolve carefully. When the team finds a real false positive or false negative, that case should become a regression example. Otherwise the same error can return after a future rule edit.</p>
+<h3>Combining Rules and Vectors</h3>
+<p>The choice does not have to remain binary. Rules can handle strict constraints, while vector search expands recall. A system can first apply permissions, dates, languages, and required categories with explicit filters. It can then rank the remaining candidates by semantic similarity.</p>
+<p>Another design uses two independent candidate generators. One returns keyword matches. The other returns vector neighbors. A later stage merges, deduplicates, and ranks them. The interface can still show keyword evidence and clearly label results that came only from semantic similarity.</p>
+<p>This hybrid design preserves an important distinction: hard requirements are not the same as relevance hints. A similarity score should not override a permission boundary or a mandatory business rule. Explicit policy belongs in explicit logic.</p>
+<p>PostgreSQL includes full text search features for document matching. The pgvector extension adds exact and approximate nearest-neighbor search for vectors. Keeping both forms of retrieval near the same data can simplify a hybrid design, although the correct architecture still depends on the corpus and workload.</p>
+<h3>Conclusion</h3>
+<p>Embeddings are powerful, but they should solve an observed retrieval problem. A transparent keyword matcher is often a strong first version because it exposes evidence, supports direct review, and creates a measurable baseline.</p>
+<p>The key is not to claim that rules are intelligent. The key is to make their limits visible. Measure missed results and noisy results against real documents. Then add semantic retrieval where it improves the measured outcome.</p>
+<h3>Other</h3>
+<p>I want to try a hybrid review screen that shows keyword evidence beside semantic candidates. I also want to record which candidate generator found each item and let reviewers label false positives and false negatives. Those labels could guide both rule changes and later retrieval experiments.</p>
+<p>A better design would version the rules and evaluation corpus together. Each release could show the exact result diff before deployment. This would make search changes reviewable in the same way as code changes.</p>
+<h3>Reference</h3>
+<p><strong>PostgreSQL</strong></p>
+<p>Full Text Search: <a href="https://www.postgresql.org/docs/current/textsearch.html">https://www.postgresql.org/docs/current/textsearch.html</a></p>
+<p><strong>pgvector</strong></p>
+<p>Open-source vector similarity search for Postgres: <a href="https://github.com/pgvector/pgvector">https://github.com/pgvector/pgvector</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body></html>

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>Embeddingの前に説明可能なマッチングを：キーワードがベクトルより適する場合</title></head><body>
+<h1>Embeddingの前に説明可能なマッチングを：キーワードがベクトルより適する場合</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/ja-cover.png" alt="Embeddingの前に説明可能なマッチングを：キーワードがベクトルより適する場合"></figure>
+<p>本記事では、透明性の高いキーワードマッチャーが検索システムの最初の選択として適切になる理由を説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>はじめに</li><li>概要</li><li>説明可能なマッチングの仕組み</li><li>利点</li><li>欠点</li><li>実データでの評価</li><li>ルールとベクトルの組み合わせ</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>はじめに</h3>
+<p>Semantic search は魅力的です。二つの文章に同じ単語がなくても、関連する考えを見つけられます。Embedding は文章をベクトルへ変換し、nearest-neighbor query は意味の近い項目を取得します。これは有用な技術です。</p>
+<p>しかし、有用な技術が常に最初の実装に向くとは限りません。なぜ一致したのかをプロダクトチームが確認したい場合があります。すべてのルールをレビュアーが承認する必要もあります。コーパスが人の目で確認できる規模かもしれません。誤検出の損失が見逃しより大きいこともあります。このような場合、キーワードと明示的なルールは、ベクトルが標準では提供しない「目に見える根拠」を与えます。</p>
+<p>これは Embedding への反対ではありません。導入順序の話です。まず、誤りを測定できる最も単純な仕組みから始めます。次に、何を解決すべきかがデータで分かってから semantic retrieval を追加します。</p>
+<h3>概要</h3>
+<p>ルールベースのマッチャーには、文書、ルール集合、一致の定義という三つの基本入力があります。ルールは単語、フレーズ、必須の組み合わせ、または除外条件です。出力はスコアだけでは不十分です。結果を生んだ正確な根拠も含めるべきです。</p>
+<p>たとえば、タイトルに承認済みの二つのフレーズがあったため一致した、と表示できます。別の結果では、除外フレーズがあったため棄却したと表示できます。ベクトル距離の知識がなくても、人はその説明を読めます。</p>
+<p>この方法は開発のループを変えます。誤検出なら、レビュアーは具体的なルールを指摘できます。関連文書が欠けているなら、ルールで扱えていない表現を特定できます。修正は小さく、テスト可能で、議論しやすくなります。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-20-con-10-explainable-matching/ja-diagram-1.png" alt="文書が可視化されたルールを通り、根拠とレビューへ進む流れ"></figure>
+<p><em>透明な第一段階のマッチャーは、結果とその理由の両方を返します。</em></p>
+<h3>説明可能なマッチングの仕組み</h3>
+<p><strong>一致の前に正規化する</strong></p>
+<p>小さな表記差が明白な一致を隠すことがあります。大文字と小文字、句読点、空白、一般的な文字の異体は一貫して扱います。正規化は予測可能でなければなりません。意味まで変える正規化は、新しい見えない誤りを作ります。</p>
+<p><strong>曖昧な単語にはフレーズを使う</strong></p>
+<p>広い意味を持つ単語は、無関係な複数分野に現れます。フレーズは文脈を加えます。二つの語の共起を必須にすることもできます。Semantic model より柔軟ではありませんが、境界は明確です。チームは何を認識でき、何を認識できないか理解できます。</p>
+<p><strong>採用条件と除外条件を分ける</strong></p>
+<p>採用条件は候補になる理由です。除外条件は、一見妥当な一致を無効にする理由です。両者を分けるとレビューが簡単になります。また、長い式が誰にも理解できない隠れたプログラムになることを防げます。</p>
+<p><strong>根拠をデータとして返す</strong></p>
+<p>結果には rule identifier、一致したテキスト、一致したフィールドを含めます。最終スコアから後で根拠を復元すべきではありません。結果と一緒に保存すれば、ルール変更後も過去の判断を監査できます。</p>
+<h3>利点</h3>
+<p>第一の利点はデバッグしやすさです。誤った結果には目に見える理由があります。同じ文書とルール集合で再現できます。Dense representation のどの部分がランキングへ影響したか推測する必要がありません。</p>
+<p>第二の利点は制御です。Product owner は重要な分類に高精度なフレーズを定義できます。Engineer は公開前に追加ルールをテストできます。レビュアーは広すぎるルールを却下できます。なぜ項目を表示したか説明すべき製品では特に有効です。</p>
+<p>第三の利点は明確な baseline です。後から追加した Embedding システムが、選んだ評価セットでルールを上回れないなら、複雑さを増やす理由がありません。Baseline があれば、「semantic search の方が賢そう」という印象を測定可能な主張へ変えられます。</p>
+<p>第四の利点は運用の単純さです。多くの場合、文書を保持する既存のアプリケーションとデータベースでルールを実行できます。初期段階では embedding job、vector index、model dependency、re-embedding workflow が不要な場合があります。</p>
+<h3>欠点</h3>
+<p>キーワードは言い換えを自然には理解しません。同義語や予想外の語彙を使う説明を見逃します。分野の変化に合わせた保守も必要です。構造を管理する担当者がいなければ、ルール集合は例外の寄せ集めになります。</p>
+<p>一つの言語で有効なルールが別の言語では機能しないこともあります。Tokenization と単語境界は言語で異なります。略語、表記揺れ、多言語混在では完全一致が壊れやすくなります。</p>
+<p>Coverage にもリスクがあります。高い precision は低い recall を生むことがあります。きれいな結果一覧の裏で、関連文書が見えなくなるかもしれません。だからキーワード方式にも評価が必要です。説明可能性は正しさを保証しません。誤りを見つけやすくするだけです。</p>
+<h3>実データでの評価</h3>
+<p>すべての変更を、固定した代表的な実文書の集合で評価したいと考えています。既知の positive、negative、判断の難しい境界事例を含めます。現在のルールで処理できる例だけを集めてはいけません。</p>
+<p>ルール変更ごとに before と after を比較します。新しく一致した文書は何か。消えた文書は何か。変化した各結果に、どの根拠が作用したか。件数も役立ちますが、コーパスを確認できる規模なら差分を一行ずつ読む方が有効です。</p>
+<p>Precision と recall は異なる失敗を表します。Precision は返した項目のうち関連する割合です。Recall は関連項目のうち見つけた割合です。適切な均衡は workflow で変わります。探索用ツールは余分な候補を許容できます。自動処理にははるかに高い precision が必要です。</p>
+<p>評価セットも慎重に育てます。実際の false positive または false negative が見つかったら、regression example として追加します。そうしなければ、将来のルール編集で同じ誤りが戻ります。</p>
+<h3>ルールとベクトルの組み合わせ</h3>
+<p>選択を二者択一のままにする必要はありません。ルールが厳格な制約を処理し、vector search が recall を広げられます。まず permission、date、language、required category を明示的な filter で適用し、残った候補を semantic similarity で順位付けできます。</p>
+<p>二つの独立した candidate generator を使う設計もあります。一つは keyword match、もう一つは vector neighbor を返します。後段で統合、重複排除、順位付けします。画面には keyword evidence を表示し、semantic similarity だけで見つかった結果には明確なラベルを付けられます。</p>
+<p>Hybrid design では、hard requirement と relevance hint の違いを守ることが重要です。Similarity score が permission boundary や必須の business rule を上書きしてはいけません。明示的な policy は明示的な logic に置きます。</p>
+<p>PostgreSQL は文書検索向けの full text search を備えています。pgvector extension はベクトルの exact および approximate nearest-neighbor search を追加します。同じデータの近くに両方の取得方法を置くと hybrid design を単純化できる場合があります。ただし、適切な構成はコーパスと workload に依存します。</p>
+<h3>まとめ</h3>
+<p>Embedding は強力ですが、観測された検索問題を解くために使うべきです。透明なキーワードマッチャーは、根拠を示し、直接レビューでき、測定可能な baseline を作るため、最初のバージョンとして有力です。</p>
+<p>ルールが知的だと主張することが重要なのではありません。限界を見えるようにすることが重要です。実文書に対する見逃しとノイズを測定し、測定結果を改善できる場所へ semantic retrieval を追加します。</p>
+<h3>今後</h3>
+<p>Keyword evidence と semantic candidate を並べて表示する hybrid review screen を試したいです。各項目をどの candidate generator が見つけたか記録し、reviewer が false positive と false negative を付けられるようにもしたいです。その label はルール変更と将来の retrieval experiment の両方に役立ちます。</p>
+<p>より良い設計では、ルールと評価コーパスを一緒に version 管理します。各 release の前に正確な結果差分を表示できます。これにより、検索変更をコード変更と同じようにレビューできます。</p>
+<h3>参考</h3>
+<p><strong>PostgreSQL</strong></p>
+<p>Full Text Search: <a href="https://www.postgresql.org/docs/current/textsearch.html">https://www.postgresql.org/docs/current/textsearch.html</a></p>
+<p><strong>pgvector</strong></p>
+<p>Postgres向けオープンソースvector similarity search: <a href="https://github.com/pgvector/pgvector">https://github.com/pgvector/pgvector</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body></html>
