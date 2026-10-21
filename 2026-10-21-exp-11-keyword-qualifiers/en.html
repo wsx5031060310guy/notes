@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Why My Tender-Matching Tool Thought a CT Scanner Was a Computer</title></head>
+<body>
+<h1>Why My Tender-Matching Tool Thought a CT Scanner Was a Computer</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-21-exp-11-keyword-qualifiers/en-cover.png" alt="Why My Tender-Matching Tool Thought a CT Scanner Was a Computer"></figure>
+<p>In this blog, I will explain why broad keywords broke a tender-matching tool and how I made each match easier to trust.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I built a small internal tool to match open Taiwanese government tenders to a company's capabilities. The first version used a keyword table. This was a deliberate choice. Each match could show the exact words that triggered it.</p>
+<p>That explanation mattered. A person reviewing a tender could see why the tool selected it. If the reason was wrong, I could change one rule and inspect the result. There was no hidden score to interpret.</p>
+<p>The weakness appeared when I reviewed the full list of open tenders. The rules recognized categories, but many tender titles named products instead. A title might say laptop, tablet, network firewall, or wireless network without using the broader category already in the table. Those tenders were relevant, but the tool missed them.</p>
+<p>The tempting fix was to add shorter and broader words. That would increase recall quickly. It would also create matches that looked reasonable until someone read the original Chinese title.</p>
+<h3>Overview</h3>
+<p>Keyword matching has two common failure modes. A narrow rule misses relevant records. A broad rule catches unrelated records. In this case, the language made broadening especially risky.</p>
+<p>The bare word for "computer" also appears inside the Chinese term used for a CT scanner. A rule for "workstation" can match an irrigation agency's field station. A rule for "monitor" can match patient monitors. Ticket-machine paper can also be pulled into a search intended for computers.</p>
+<p>These are not obscure edge cases invented for a test. They appeared while I reviewed the live list of open tenders. Each false match had a visible reason, which made the mistake easy to diagnose. The problem was not the matcher. The problem was what the keyword claimed to mean.</p>
+<p>I adopted one rule: the qualifier must live inside the keyword itself. Instead of relying on a broad word plus later interpretation, the keyword should carry enough context. "Laptop computer" and "network firewall" are examples. The rule becomes more specific at the point where the match is created.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-21-exp-11-keyword-qualifiers/en-diagram-1.png" alt="Workflow for adding and reviewing qualified tender keywords"></figure>
+<p><em>The adopted workflow: add a qualified keyword, run it against the live tender list, and review every new match before merging.</em></p>
+<h3>Demo</h3>
+<p>My review process starts with the live corpus, not with a few handpicked examples. I run the current keyword table against all open tenders and record the existing matches. Then I add a candidate keyword and run the same list again.</p>
+<p>I compare the before and after counts. The count is useful, but it is not the decision. A larger number can mean better coverage, more noise, or both. I therefore inspect every newly matched tender line by line.</p>
+<p>For each addition, I ask a simple question: would I be comfortable showing this tender to the company as a match? I also read the trigger shown by the tool. If the trigger is a broad fragment with a different meaning in context, the keyword is not ready.</p>
+<p>This is where qualified phrases help. A phrase such as "laptop computer" says more about intent than "computer" alone. "Network firewall" is narrower than "firewall" when the goal is to match a particular capability. The phrase may miss some wording variants, but its reason is clear. I can add another specific phrase later after measuring it.</p>
+<p>In one measurement, one company's matches increased from 150 to 174. I reviewed every addition and found zero noise among those new matches. That result belonged to that live list and that keyword change. I do not treat it as a universal benchmark. The useful part was the method: compare, inspect, then merge.</p>
+<p>The same process also tells me when not to add a word. "Monitor" sounds relevant in isolation, but patient-monitor tenders change its meaning. "Workstation" sounds like computing equipment, but a field station for an irrigation agency is not the intended match. A broad term that needs repeated exceptions is a sign that the qualifier belongs in the keyword.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits</strong></p>
+<p>The biggest benefit is debuggability. The tool can state, "this title matched because of this phrase." When the result is wrong, I can inspect the phrase, the title, and the surrounding meaning. The path from symptom to rule is short.</p>
+<p>The second benefit is controlled change. I do not judge a keyword from intuition alone. I measure it against the live corpus. The before and after counts show the size of the change, while the line-by-line review checks its quality.</p>
+<p>This also makes review easier. A teammate does not need to understand an embedding model or an opaque relevance score. The evidence is the tender title and the keyword that fired. A visible wrong reason is easier to discuss and fix than an invisible score.</p>
+<p><strong>Drawbacks</strong></p>
+<p>Specific phrases require maintenance. Real tender titles use variations, abbreviations, and different word order. A qualifier that removes noise can also reduce recall. I have to add variants carefully rather than assume one phrase covers the whole category.</p>
+<p>Manual review also takes time. It is practical when I inspect only the newly matched set, but it would become expensive if every change produced a very large difference. The method works because the tool exposes the delta instead of asking me to reread the entire corpus.</p>
+<p>Keyword rules do not understand meaning in the way people do. They match text. That limitation is acceptable here because the output is explainable and the changes are measured. The matcher is a filter for human review, not a final decision maker.</p>
+<p>I also learned to separate recall from trust. Adding a broad term can make the match count look better immediately. If reviewers start ignoring noisy results, however, the tool becomes less useful. A smaller set with visible reasons can be more useful than a larger set that needs guessing.</p>
+<h3>Conclusion</h3>
+<p>The CT scanner match was not a strange failure of search technology. It was the predictable result of a keyword that carried too little context.</p>
+<p>I fixed the process by putting the qualifier inside the keyword and testing each change against the live list of open tenders. I compare counts, review every new match, and merge only after the added results make sense. In the measured change described here, the match count grew from 150 to 174 with zero noise in the additions.</p>
+<p>Explainable keyword matching is crude, but that can be a strength. When the system gives a wrong answer for a visible reason, I know where to start.</p>
+<h3>Other</h3>
+<p>I want to keep building a test set from reviewed tenders. It should include positive examples, known confusing terms, and titles near the decision boundary. That would make later rule changes easier to compare without replacing the live-corpus review.</p>
+<p>I also want to explore a hybrid design. Specific keywords could keep providing clear evidence, while a semantic method could suggest records that the rules may have missed. I would still present the trigger and require review before treating a suggestion as a match.</p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+<h3>Reference</h3>
+<p><strong>Public tender source</strong></p>
+<p>Government e-Procurement System: <a href="https://web.pcc.gov.tw/">https://web.pcc.gov.tw/</a></p>
+</body>
+</html>
