@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Build Green, Deploy Blocked: The One Log Line I Missed</title></head><body>
+<h1>Build Green, Deploy Blocked: The One Log Line I Missed</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-22-exp-12-vercel-blocked-after-build/en-cover.png" alt="Build Green, Deploy Blocked: The One Log Line I Missed"></figure>
+<p>A successful build did not mean my deployment was allowed to reach production.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Background</li><li>What I saw</li><li>Why the first check failed</li><li>The actual cause</li><li>The fix</li><li>Discussion</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Background</h3>
+<p>In this blog, I will describe a deployment failure that looked contradictory at first. A Vercel build finished successfully. The deployment then stopped during the “Deploying outputs” stage. My first search of the log found no error, because I searched for the wrong word.</p>
+<p>This was not a compiler failure. It was not a failed test. It was also not a generic platform outage. The platform examined the built output and blocked it because the application would have shipped a dependency version with a known critical vulnerability.</p>
+<p>The distinction matters. A build answers one question: can the project produce an output? A deployment platform may ask more questions after that. It can decide that a technically valid output is not acceptable to release. When these stages are shown in one pipeline, a green build can make the later rejection feel surprising.</p>
+<h3>What I saw</h3>
+<p>The visible sequence was simple. The build completed. The pipeline moved to “Deploying outputs.” Then the deployment failed.</p>
+<p>I did what many developers do when a long log fails: I searched for “error.” That search returned nothing useful. The one useful line did not start with “error.” It started with “Vulnerable version of”.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-22-exp-12-vercel-blocked-after-build/en-diagram-1.png" alt="The build passes before the deployment is blocked by a vulnerability check"></figure>
+<p><em>The build completed, but a later vulnerability check blocked the deployment output.</em></p>
+<p>That wording described the reason, but it did not match my search term. I had reduced a full log to a narrow filter and accidentally removed the evidence I needed.</p>
+<p>The result was a false mental model. I saw “build succeeded” and assumed the application was deployable. I saw no line containing “error” and assumed the failure message was missing. Both conclusions came from reading only part of the pipeline and only part of the log.</p>
+<h3>Why the first check failed</h3>
+<p>Log search is useful when the vocabulary is predictable. Compilers often print “error.” Test runners often print “failed.” A security policy does not have to use either word. It may name the condition directly: vulnerable package, blocked output, denied action, or policy violation.</p>
+<p>In this case, the stage name was already a clue. The failure happened after the build had passed. Re-running the same build or reading only compiler output could not explain a decision made during deployment.</p>
+<p>I should have changed the question. Instead of asking “where is the build error?”, I needed to ask “what happened after the build?” That directs attention to the transition between stages, the first line that differs from the successful path, and the platform’s own deployment checks.</p>
+<blockquote><p>A green stage proves only that stage. It does not certify every later gate.</p></blockquote>
+<h3>The actual cause</h3>
+<p>The application included a dependency version associated with a known critical vulnerability. Vercel allowed the build to finish, then blocked the deployment while processing the output.</p>
+<p>This ordering is reasonable. A platform may need the resolved dependency tree or final output before it can apply a release policy. The important point for debugging is that policy enforcement and compilation are separate checks, even when the interface presents them as one deployment run.</p>
+<p>The build result was therefore accurate. The source could be compiled into an output. The deployment result was also accurate. That output did not satisfy the platform’s security requirement. There was no contradiction once I separated those two statements.</p>
+<h3>The fix</h3>
+<p>I upgraded the affected dependency. That was the fix listed by the deployment evidence. I did not treat the successful build as permission to bypass the security block.</p>
+<p>I also changed how I inspect this class of failure. When a deployment fails after a green build, I read the complete deployment log with <strong>vercel inspect --logs</strong>. I do not search only for “error.” I look at the stage boundary and read the lines around the first failure.</p>
+<p>This is a small debugging habit, but it prevents a large waste of time. A filtered view is a hypothesis. If the filter returns nothing, that does not prove the log has no cause. It may prove only that the cause uses different language.</p>
+<p>The sequence I now recommend is:</p>
+<ol><li>Confirm which stage passed and which stage failed.</li><li>Open the complete deployment log.</li><li>Read the first message after the last successful stage.</li><li>Search for the exact phrase shown by the platform, not only generic words.</li><li>Fix the stated dependency or policy issue, then run the normal deployment again.</li></ol>
+<h3>Discussion</h3>
+<p><strong>Benefits of stage-aware debugging</strong></p>
+<p>It narrows the search without hiding evidence. If compilation passed, I can stop looking for a syntax error. If output deployment failed, I can focus on policy checks, packaging, and platform decisions. The stage gives context; the full log gives the reason.</p>
+<p>It also makes status reports more precise. “The build passed, but deployment was blocked” is more useful than “deploy failed.” It tells another engineer that the produced output exists and that a later gate rejected it.</p>
+<p><strong>Drawbacks of keyword-only triage</strong></p>
+<p>A keyword filter is fast, but it silently assumes the system will use my vocabulary. That assumption breaks across tools and stages. Security checks may say “vulnerable.” Permission systems may say “denied.” Capacity checks may say “limit reached.” None needs to print the literal word “error.”</p>
+<p>Keyword-only triage can also make success indicators too powerful. A green build badge is visually strong. It invites me to ignore a later red stage or to treat it as infrastructure noise. The safer reading is local: green means this one check passed.</p>
+<p><strong>A better operational habit</strong></p>
+<p>I want deployment reviews to preserve stage names and the first failing line. A short summary should say what passed, what failed, and quote the platform’s reason. If an automated summary cannot preserve that evidence, the complete log should remain easy to open.</p>
+<p>I also want dependency checks earlier in the development workflow. That would provide faster feedback, but it would not replace the platform gate. Local and CI checks can differ from the policy applied to the final deployment output. The platform remains the final source for why it accepted or rejected that release.</p>
+<h3>Conclusion</h3>
+<p>The build was green because the code produced an output. The deployment was blocked because that output contained a dependency version with a known critical vulnerability. The only useful clue began with “Vulnerable version of”, so my search for “error” hid it.</p>
+<p>The fix was to upgrade the dependency. The debugging lesson was broader: identify the failing stage, then read its complete log. Do not let one successful stage answer a question it was never designed to answer.</p>
+<h3>Other</h3>
+<p>Next, I want to make the failure summary capture the stage boundary and the first policy message without replacing the raw log. I also want to review whether dependency checks can run earlier, so the same issue appears before the final deployment step.</p>
+<p>These are improvements I want to try. The change I completed in this case was the dependency upgrade and the use of the full deployment logs for diagnosis.</p>
+<h3>Reference</h3>
+<p><strong>Vercel documentation</strong></p>
+<p>Vercel CLI inspect command: <a href="https://vercel.com/docs/cli/inspect">https://vercel.com/docs/cli/inspect</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body></html>
