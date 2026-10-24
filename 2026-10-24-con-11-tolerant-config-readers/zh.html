@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>跨版本共用設定檔：Tolerant Reader 與未知值</title></head>
+<body>
+<h1>跨版本共用設定檔：Tolerant Reader 與未知值</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-24-con-11-tolerant-config-readers/zh-cover.png" alt="跨版本共用設定檔：Tolerant Reader 與未知值"></figure>
+<p>共用設定檔就是一個介面，而讀取它的每支程式都是這個介面的客戶端。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>前言</li><li>概觀</li><li>未知值為何會破壞舊版 Reader</li><li>設計 Tolerant Reader</li><li>驗證與有用的錯誤</li><li>升級與版本固定策略</li><li>優點與缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>前言</h3>
+<p>設定通常看起來像某一支程式擁有的內部資料。實際上，它可能變成同一台機器裡的公開介面。CLI 會讀取它，桌面應用程式會修改它，排程工作稍後也會使用它。不同版本甚至可能同時碰到同一個檔案。到了這一步，設定變更也就是相容性變更。</p>
+<p>TOML 讓設定容易閱讀，也把字串、整數、布林值、陣列、日期與 table 明確對應到常見資料結構。不過，一份語法完全正確的 TOML，仍可能被特定應用程式拒絕。Parser 也許看得懂 key 與 value，應用程式卻不一定知道那個 value 代表什麼。</p>
+<p>語法驗證回答的是「這是不是有效的 TOML？」應用程式驗證回答的是「這個版本能不能安全使用這些設定？」這是兩個不同問題。穩健的設定 Reader 必須同時處理。</p>
+<h3>概觀</h3>
+<p>假設兩支程式共用一個檔案。較新的 Writer 加入一項設定，舊版 Reader 稍後才啟動。如果舊版 Reader 要求 schema 完全一致，它可能在開始工作前就拒絕整份檔案。新設定即使與它無關，也會讓它無法使用。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-24-con-11-tolerant-config-readers/zh-diagram-1.png" alt="新版設定 Writer 影響舊版 Reader 的流程"></figure>
+<p><em>相容的 Reader 會忽略未知的選用資料，並清楚回報不支援的必要值。</em></p>
+<p>設計時要分開判斷三種情況：</p>
+<ul><li>Reader 不需要的未知 key。</li><li>已知 key 搭配有效值。</li><li>已知 key 搭配不支援或格式錯誤的值。</li></ul>
+<p>把三種情況全部當成致命錯誤會太僵化，全部當成沒問題又太危險。實用設計應該對無關的新增內容保持寬容，對影響正確運作的設定保持嚴格。</p>
+<h3>未知值為何會破壞舊版 Reader</h3>
+<p>常見作法是把整份檔案直接綁定到封閉的資料型別。每個 field 與 enum value 都必須吻合。這看起來很安全，因為程式會拒絕任何意外內容；但它也讓所有 Reader 與所有 Writer 緊密耦合。就算舊版軟體不需要新欄位也能繼續工作，一個新的選用欄位仍可能成為破壞性變更。</p>
+<p>類似 enum 的值特別容易出問題。假設某項設定用來選擇 mode。新版程式支援一個新 mode 並把名稱寫入檔案，舊版程式只認得原本的名稱。這份檔案仍是有效 TOML，deserialize 或應用程式驗證卻會失敗。</p>
+<p>錯誤可能很早發生。工具在啟動階段停止，甚至還沒有進入 logging、網路存取或使用者要求的 command。症狀因此看起來與設定無關。排程工作可能只留下非零 exit code；另一個 component 因為使用新版 Reader，仍可正常運作。共用擁有權讓小型相容性落差變成系統問題。</p>
+<h3>設計 Tolerant Reader</h3>
+<p>Martin Fowler 的 Tolerant Reader pattern 建議客戶端只取用需要的資料，並忽略不會使用的新增內容。套用到設定檔時，Reader 可以先把文件 parse 成通用結構，再擷取自己支援的設定。未知且選用的 key 可以保留原狀。</p>
+<p>這不代表「全部接受」。Reader 應該拒絕無效語法。如果某個已知設定會影響行為，但 value 不受支援，也應該拒絕。儲存路徑使用錯誤型別，或必要 mode 不明時，猜一個值繼續執行可能比停止更危險。</p>
+<p><strong>實用的判斷規則</strong></p>
+<ul><li>未知 key 若是選用項目，而且不屬於這支程式的責任，可以忽略。</li><li>已知 key 必須通過型別與允許值驗證才能接受。</li><li>必要 key 缺少或無法使用時，應該失敗。</li><li>不要把明確但不支援的 value 靜默換成 default。</li></ul>
+<p>Default 適合用在設定缺少，而且文件契約已定義預設值的情況。它不是通用逃生門。如果檔案明確要求 Reader 無法實作的 mode，靜默 fallback 只會隱藏相容性問題。</p>
+<p>Writer 也要保留未知資料。若程式讀取檔案、修改一個設定，再把整份檔案寫回，就不應刪除自己不理解的 key。否則舊版編輯器可能抹掉新版工具的設定。只編輯目標項目，或採用能 round-trip 未知值的表示方式，可以降低風險。</p>
+<h3>驗證與有用的錯誤</h3>
+<p>驗證應該在程式開始工作前的 startup 階段執行。錯誤內容應該指出檔案、key、收到的 value，以及已知的允許選項。「設定無效」並不夠，因為操作者只能檢查整份檔案，再猜是哪個 Reader 拒絕它。</p>
+<p>有用的訊息可以是：「key X 無法使用 value Y；此 Reader 接受 A 或 B。」訊息也應說明要刪除 key、修改 value，還是升級 Reader。錯誤不能抄出 secret，因此診斷層仍需要遮蔽規則。</p>
+<p>對排程工作來說，應保存標準錯誤輸出的第一行可行動訊息。只回報 exit code 的 wrapper 會遺失最重要線索。若程式在 parse 設定時就停止，工作執行器不應自行猜測成登入或 rate limit 問題。</p>
+<p>測試必須涵蓋演進的兩個方向。把含有額外選用 key 的檔案交給舊版 Reader，確認它仍可啟動。再為 Reader 會使用的 key 提供不支援的值，確認它以明確訊息失敗。也要檢查舊版 Writer 儲存檔案時，不會移除未知 key。</p>
+<h3>升級與版本固定策略</h3>
+<p>寬容讀取能減少意外破壞，但不能取代版本管理。有意共用同一份檔案的程式，已經形成一個相容性群組。可以的話應一起升級；如果無法協調，就要記錄仍受支援的最舊 Reader，並用它測試新版 Writer 的輸出。</p>
+<p>自動化需要可預期行為時，版本固定很有用。要把共用檔案的工具當成一組固定，而不是分開固定。Writer 往前走、Reader 留在原地，就會重現同一問題。升級前，如果 Reader 提供 config validation command，也應先執行。</p>
+<p>另一個選項是分開擁有權。每支程式使用自己的檔案，只把真正共用的設定留在小而穩定的一層。這會增加一些重複，卻能減少隱藏耦合。Migration tool 可以明確複製已知值，而不是讓無關應用程式重寫一份全域文件。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul><li>新的選用設定不會自動破壞舊版 Reader。</li><li>錯誤會指出真正的相容性邊界。</li><li>工具可在明確契約內獨立演進。</li><li>排程工作會因可見原因失敗，而不是只留下模糊症狀。</li></ul>
+<p><strong>缺點</strong></p>
+<ul><li>忽略未知 key 可能藏住拼字錯誤。</li><li>要保留未知資料，Writer 會更複雜。</li><li>相容性測試必須涵蓋多個 Reader 與 Writer 版本。</li><li>過度寬容可能延後必要的 migration。</li></ul>
+<p>拼字問題值得另外處理。可以依 owner 劃分 namespace 或 table。在本程式擁有的 table 內，未知 key 產生 warning；在其他程式擁有的 table 內則忽略。這樣不用讓每個 component 理解整份檔案，也能保留 typo 偵測。</p>
+<h3>結論</h3>
+<p>設定檔不只是文字，而是 Writer 與 Reader 之間的契約。有效 TOML 不保證每個已安裝版本都理解相同的值。Reader 應忽略真正不需要的新增內容、驗證會使用的設定，並在無法安全運作時提供精確錯誤。</p>
+<p>最重要的問題不是「能不能 parse 這份檔案？」而是「哪些部分由我負責？另一支程式演進時要怎麼處理？」應在兩個版本開始共用檔案前先回答。</p>
+<h3>其他</h3>
+<p>我想為共用設定建立一個小型相容性 test matrix。每個 Writer 產生代表性檔案，再由每個受支援 Reader 驗證。我也想測試 round-trip 編輯，確保舊版 Writer 不會刪除未知設定。這些檢查能在升級影響排程工作前，先把設定相容性變得可見。</p>
+<h3>參考</h3>
+<p><strong>TOML</strong></p>
+<p>TOML v1.0.0: <a href="https://toml.io/en/v1.0.0">https://toml.io/en/v1.0.0</a></p>
+<p><strong>軟體設計</strong></p>
+<p>Martin Fowler — Tolerant Reader: <a href="https://martinfowler.com/bliki/TolerantReader.html">https://martinfowler.com/bliki/TolerantReader.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

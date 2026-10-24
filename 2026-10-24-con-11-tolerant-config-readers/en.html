@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Shared Config Files Across Versions: Tolerant Readers and Unknown Values</title></head>
+<body>
+<h1>Shared Config Files Across Versions: Tolerant Readers and Unknown Values</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-24-con-11-tolerant-config-readers/en-cover.png" alt="Shared Config Files Across Versions: Tolerant Readers and Unknown Values"></figure>
+<p>A shared config file is an interface, and every program that reads it is a client of that interface.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Introduction</li><li>Overview</li><li>Why unknown values break old readers</li><li>Designing a tolerant reader</li><li>Validation and useful errors</li><li>Upgrade and pinning strategies</li><li>Benefits and drawbacks</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Introduction</h3>
+<p>Configuration often looks like private data owned by one program. In practice, it can become a public interface inside one machine. A command-line tool reads it. A desktop application edits it. A scheduled job uses it later. Two installed versions may touch the same file. The moment this happens, a configuration change is also a compatibility change.</p>
+<p>TOML makes configuration readable and maps its data to familiar structures. It has strings, integers, booleans, arrays, dates, and tables. Its syntax can be perfectly valid while a particular application still rejects the content. The parser may understand a key and value, but the application may not recognize what that value means.</p>
+<p>This distinction matters. Syntax validation answers, “Is this valid TOML?” Application validation answers, “Can this version safely use these settings?” Those are different questions, and a robust config reader must handle both.</p>
+<h3>Overview</h3>
+<p>Consider two programs that share one file. A newer writer adds a setting. The older reader starts later. If the older reader expects an exact schema, it may reject the entire file before doing useful work. The new setting may be unrelated to that reader, but the reader still becomes unavailable.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-24-con-11-tolerant-config-readers/en-diagram-1.png" alt="How a newer config writer can affect an older reader"></figure>
+<p><em>A compatible reader ignores unknown optional data but reports unsupported required values clearly.</em></p>
+<p>There are three separate cases to decide:</p>
+<ul><li>An unknown key that this reader does not need.</li><li>A known key with a valid value.</li><li>A known key with an unsupported or malformed value.</li></ul>
+<p>Treating all three cases as fatal is rigid. Treating all three as harmless is dangerous. The useful design is tolerant about irrelevant additions and strict about settings that affect correct operation.</p>
+<h3>Why Unknown Values Break Old Readers</h3>
+<p>A common implementation binds the complete file directly to a closed data type. Every field and enum value must match. This feels safe because the program rejects surprises. It also couples every reader to every writer. A new optional field can become a breaking change for old software even when the old software could have continued without it.</p>
+<p>Enum-like values are especially easy to break. Suppose a setting selects a mode. A newer program learns a new mode and writes its name. An older program knows only the previous names. The file remains valid TOML, but deserialization or application validation fails.</p>
+<p>The failure can occur very early. The tool may stop during startup, before it reaches logging, network access, or the command the user requested. This makes the symptom look unrelated to configuration. A scheduled task only shows a non-zero exit. Another component may continue to work because it uses a newer reader. Shared ownership turns a small compatibility mismatch into a system problem.</p>
+<h3>Designing a Tolerant Reader</h3>
+<p>Martin Fowler’s Tolerant Reader pattern recommends consuming only the data a client needs and ignoring additions it does not use. Applied to configuration, the reader should parse the document into a general structure first, then extract its own supported settings. Unknown optional keys can remain untouched.</p>
+<p>This does not mean “accept everything.” A reader should reject invalid syntax. It should also reject a known setting when the value would change behavior but is not supported. If a storage path has the wrong type, or a required mode is unknown, continuing with a guessed value can be worse than stopping.</p>
+<p><strong>A practical decision rule</strong></p>
+<ul><li>Ignore an unknown key when it is optional and outside this program’s responsibility.</li><li>Accept a known key only after validating its type and allowed values.</li><li>Fail when a required key is absent or unusable.</li><li>Do not silently replace an explicit but unsupported value with a default.</li></ul>
+<p>Defaults are suitable when a setting is missing and the documented contract defines a default. They are not a universal escape hatch. If the file explicitly requests a mode the reader cannot implement, falling back silently hides the compatibility problem.</p>
+<p>Preserving unknown data also matters for writers. A program that reads a file, changes one setting, and writes the whole file back should avoid deleting keys it does not understand. Otherwise an older editor can erase settings that belong to a newer tool. A targeted edit or a round-trip-capable representation can reduce that risk.</p>
+<h3>Validation and Useful Errors</h3>
+<p>Validation should happen at startup, before the program begins work. The error should name the file, the key, the received value, and the accepted choices when those choices are known. “Invalid configuration” is not enough. It forces an operator to inspect the complete file and guess which reader rejected it.</p>
+<p>A useful message has the shape: “Cannot use key X with value Y; this reader accepts A or B.” It should also explain whether the user should remove the key, change the value, or upgrade the reader. Secrets should never be copied into an error, so the diagnostic layer still needs redaction rules.</p>
+<p>For scheduled jobs, preserve the first actionable error from standard error. A wrapper that reports only an exit code loses the most valuable clue. The job runner should not invent a likely cause such as authentication or rate limiting when config parsing failed before any request was made.</p>
+<p>Tests should cover both directions of evolution. Give an old reader a file containing an extra optional key and verify that it still starts. Give it an unsupported value for a key it uses and verify that it fails with a specific message. Also check that an old writer does not remove unknown keys when it saves.</p>
+<h3>Upgrade and Pinning Strategies</h3>
+<p>Tolerance reduces accidental breakage, but it does not remove the need for version management. Programs that intentionally share a file form a compatibility group. Upgrade them together when possible. If coordinated upgrades are not possible, document the oldest supported reader and test new writes against it.</p>
+<p>Pinning is useful when automation depends on predictable behavior. Pin the tools that share the file as a set, not independently. A writer that moves ahead while a reader stays behind recreates the same problem. Before an upgrade, run each reader’s config validation command if it provides one.</p>
+<p>Another option is separate ownership. Give each program its own file and keep shared settings in a small, stable layer. This adds some duplication, but it reduces hidden coupling. A migration tool can copy known values explicitly instead of allowing unrelated applications to rewrite one global document.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul><li>New optional settings do not automatically break older readers.</li><li>Errors point to the exact compatibility boundary.</li><li>Tools can evolve independently within a documented contract.</li><li>Scheduled work fails for a visible reason instead of producing a vague symptom.</li></ul>
+<p><strong>Drawbacks</strong></p>
+<ul><li>Ignoring unknown keys can hide spelling mistakes.</li><li>Preserving unknown data makes writers more complex.</li><li>Compatibility tests require several reader and writer versions.</li><li>Too much tolerance can postpone necessary migrations.</li></ul>
+<p>The spelling problem deserves attention. One approach is to distinguish namespaces or tables by owner. Inside a table owned by this program, unknown keys can produce warnings. In tables owned by another program, they can be ignored. This keeps typo detection without making every component understand the entire file.</p>
+<h3>Conclusion</h3>
+<p>A configuration file is not only text. It is a contract between writers and readers. Valid TOML does not guarantee that every installed reader understands the same values. The reader should ignore additions it genuinely does not need, validate the settings it does use, and fail with a precise message when safe operation is impossible.</p>
+<p>The most important question is not “Can I parse this file?” It is “Which parts am I responsible for, and what should happen when another program evolves?” Answer that before two versions share the file.</p>
+<h3>Other</h3>
+<p>I want to try a small compatibility test matrix for shared configuration. Each writer would produce representative files, and each supported reader would validate them. I also want to test round-trip editing so an older writer cannot erase unknown settings. These checks would make config compatibility visible before an upgrade reaches scheduled jobs.</p>
+<h3>Reference</h3>
+<p><strong>TOML</strong></p>
+<p>TOML v1.0.0: <a href="https://toml.io/en/v1.0.0">https://toml.io/en/v1.0.0</a></p>
+<p><strong>Software design</strong></p>
+<p>Martin Fowler — Tolerant Reader: <a href="https://martinfowler.com/bliki/TolerantReader.html">https://martinfowler.com/bliki/TolerantReader.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
