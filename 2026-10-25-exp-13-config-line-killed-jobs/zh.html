@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>桌面應用程式的一行設定，讓排程 AI 工作停擺九天</title></head>
+<body>
+<h1>桌面應用程式的一行設定，讓排程 AI 工作停擺九天</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-25-exp-13-config-line-killed-jobs/zh-cover.png" alt="桌面應用程式的一行設定，讓排程 AI 工作停擺九天"></figure>
+<p>這篇文章要分享一個真實案例：共用設定檔裡的一個值，讓八個排程 AI 工作在送出任何請求前就停止。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>背景</li><li>哪裡失敗</li><li>為什麼警報不夠</li><li>失敗流程</li><li>修正方式</li><li>討論</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>背景</h3>
+<p>我的家用伺服器上有八個排程 AI 報表工作。它們都使用 Codex CLI，也共用同一份設定檔。</p>
+<p>共用設定很方便。model、service 選項或驗證相關設定只要改一次，所有工作都能取得相同的值。但同一項便利也會擴大故障範圍。只要有一個不相容的值，所有讀取這份檔案的程式都可能一起停止。</p>
+<p>這次的情況是，同一台機器上的桌面元件把 <strong>service_tier = "priority"</strong> 寫入共用設定檔。已安裝的 CLI 版本只接受 <strong>fast</strong> 或 <strong>flex</strong>，因此在啟動時直接拒絕載入設定。</p>
+<p>失敗的時間點很重要。錯誤發生在讀取設定時，當時還沒有送出任何 AI 請求。驗證、rate limit、prompt 與遠端服務都還沒進入執行路徑。</p>
+<h3>哪裡失敗</h3>
+<p>八個工作仍然會在排定時間啟動。每個程序讀取共用設定後，就以結束碼 1 離開。這個情況持續了九天。</p>
+<p>從 scheduler 的角度看，工作有被啟動；從報表系統的角度看，卻沒有產生任何成果。這是兩種不同狀態。按時啟動只能證明 scheduler 執行了命令，不能證明命令完成了有用的工作。</p>
+<p>那個設定值不是隨機損壞的文字。對寫入它的桌面元件而言，這是有效值；對稍後讀取檔案的 CLI 而言，卻是無效值。兩個程式共用同一份檔案，卻沒有共用相同的值域。</p>
+<p>大約三個月前，相同的設定值也曾破壞同一台機器上的另一個工作。重複發生很重要，因為這表示系統仍允許相同的不安全狀態再次出現。</p>
+<h3>為什麼警報不夠</h3>
+<p>每次失敗都有傳送聊天警報。表面上看來，監控有正常運作。但警報只說工作以 <strong>rc=1</strong> 失敗，相關紀錄則猜測原因可能是登入或 rate limit。</p>
+<p>結束碼很有價值。它能證明這次執行不能算成功，但無法單獨指出原因。結束碼 1 是廣泛的失敗訊號，不是診斷結果。</p>
+<p>真正的錯誤訊息在 stderr 裡，內容直接指出不支援的設定值。然而，下一次執行會清理工作目錄，也會刪除 stderr 檔案。證據只短暫存在，警報沒有把它保留下來。</p>
+<p>這造成一個不好的除錯循環：系統只回報一般症狀，詳細證據隨後消失，剩下的紀錄又提供一個推測。這個推測把調查方向帶往遠端服務，但實際上請求根本還沒離開本機。</p>
+<p>好的警報應該區分事實與解釋。「以結束碼 1 離開」是事實；「可能是登入或 rate limit」是缺乏證據的解釋。若當時直接附上 stderr 第一行 ERROR，價值會高得多。</p>
+<h3>失敗流程</h3>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-25-exp-13-config-line-killed-jobs/zh-diagram-1.png" alt="從共用設定到錯誤診斷的失敗流程"></figure>
+<p><em>實際發生的流程：不支援的共用設定阻止啟動，而有用的錯誤證據在下次執行時消失。</em></p>
+<p>這張圖說明了為什麼警報在技術上正確，實際運作上卻不夠。工作確實失敗，警報也確實送達，但在 cleanup 刪除證據前，警報沒有提供足以找出設定問題的內容。</p>
+<p>此外還有第二層問題。移除不相容的 service tier 設定後，工作沒有立刻恢復。接著才看見另一個錯誤：設定檔中的 default model 已不支援 ChatGPT account 登入，請求回傳 HTTP 400。</p>
+<p>這不是同一個故障。第一個問題發生在本機解析設定時；第二個問題發生在啟動完成並送出請求之後。修好前面的阻塞點，才會看到藏在後面的下一個問題。分層系統經常會出現這種情況。</p>
+<h3>修正方式</h3>
+<p>根據這次事件，我完成了三項直接修正。</p>
+<p><strong>第一，移除不支援的設定。</strong></p>
+<p>這讓已安裝的 CLI 能再次載入共用設定。這次並不是把 parser 改得更寬鬆，而是先讓檔案回到目前所有 reader 都能理解的狀態。</p>
+<p><strong>第二，設定一個受支援的 default model。</strong></p>
+<p>移除第一個錯誤後，舊 model 造成的 HTTP 400 才浮現。改用支援的 model，解決了這個不同層次的問題。</p>
+<p><strong>第三，讓警報包含 stderr 的第一行 ERROR。</strong></p>
+<p>下次失敗時，警報會帶上當下最有用的證據。不需要把整份 log 都塞進聊天訊息，一行精確的錯誤通常就足以區分設定解析失敗、驗證問題、model 被拒絕或其他原因。</p>
+<p>順序也很重要。結束碼仍是判斷成功或失敗的 contract，stderr 摘要則補充背景。警報不應用一個自信的猜測取代這兩項事實。</p>
+<h3>討論</h3>
+<p><strong>共用檔案也是小型介面。</strong></p>
+<p>設定檔很容易被當成被動文字，但它其實是所有 writer 與 reader 之間的介面。值本身也是介面的一部分。新版 writer 若加入舊版 reader 無法解析的值，即使語法完全正確，共用檔案仍會失去相容性。</p>
+<p><strong>啟動失敗需要不同的檢查順序。</strong></p>
+<p>若程式在送出請求前就失敗，遠端原因應該往後排。我應先確認 executable 是否啟動、設定是否載入、credential 是否選定，以及程序是否抵達網路邊界。還沒證明 client 接觸到服務前，就先調查遠端服務，通常只會浪費時間。</p>
+<p><strong>警報必須保留證據。</strong></p>
+<p>如果下一次排程執行會在人工查看前刪掉暫存 log，這份 log 就無法協助診斷。更好的設計是安全保留失敗時的 stderr，或把短短的診斷摘要放進警報。我也希望未來的警報能標出停止階段，例如 config load、local execution、request 或 delivery。</p>
+<p><strong>重複事件需要預防措施。</strong></p>
+<p>相同的值在幾個月前就曾造成問題。再次刪除它能修好眼前事故，但重複發生表示缺少 compatibility boundary。我想在排程工作開始前，用相同的 CLI 版本先驗證共用設定，也要避免不同版本在沒有相容性檢查時改寫同一份檔案。</p>
+<p><strong>優點</strong></p>
+<ul><li>共用設定能把共同值集中在一處。</li><li>結束碼提供清楚的成功或失敗判定。</li><li>短 stderr 摘要能提供原因，又不會洗版。</li></ul>
+<p><strong>缺點</strong></p>
+<ul><li>一行不相容設定可能影響所有排程程式。</li><li>籠統警報無法分辨本機與遠端失敗。</li><li>cleanup 可能刪除唯一有用的證據。</li></ul>
+<h3>結論</h3>
+<p>一行設定讓八個排程工作停擺九天。工作照時程啟動、以結束碼 1 離開，也傳出了警報；但警報沒有原因，cleanup 又刪除了 stderr 證據。</p>
+<p>這次完成的修正很明確：移除不支援的設定、指定受支援的 default model，並在警報中加入 stderr 第一行 ERROR。更大的教訓是，共用設定檔是一份相容性 contract。監控不只要告訴我工作停止，還要說明它停在哪個階段。</p>
+<h3>其他</h3>
+<p>我想加入 preflight check，使用排程工作相同的 CLI 版本載入設定。我也希望失敗證據在診斷完成前不會被 cleanup 刪除。這些是後續計畫，不是現有系統已具備的功能。</p>
+<p>更好的設計還會在不洩漏秘密的前提下，記錄執行階段與實際採用的設定來源。未來再遇到問題時，就能更快判斷故障來自解析、model 選擇、驗證、request 還是結果 delivery。</p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+<h3>參考</h3>
+<p><strong>OpenAI Codex 文件</strong></p>
+<p>Configuration Reference: <a href="https://developers.openai.com/codex/config-reference">https://developers.openai.com/codex/config-reference</a></p>
+<p>Config Basics: <a href="https://developers.openai.com/codex/config-file/config-basic">https://developers.openai.com/codex/config-file/config-basic</a></p>
+</body></html>

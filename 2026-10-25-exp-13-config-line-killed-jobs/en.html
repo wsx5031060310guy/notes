@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>One Config Line Stopped My Scheduled AI Jobs for Nine Days</title></head>
+<body>
+<h1>One Config Line Stopped My Scheduled AI Jobs for Nine Days</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-25-exp-13-config-line-killed-jobs/en-cover.png" alt="One Config Line Stopped My Scheduled AI Jobs for Nine Days"></figure>
+<p>In this blog, I will describe how one shared configuration value stopped eight scheduled AI jobs before they could send a single request.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>What failed</li>
+<li>Why the alert was not enough</li>
+<li>Demo of the failure chain</li>
+<li>The fixes</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I run eight scheduled AI report jobs on my home server. They use the Codex CLI. The jobs share one configuration file.</p>
+<p>Sharing a configuration file is convenient. A model name, service option, or authentication setting can be changed once. Every job then receives the same setting. The same convenience also creates a large failure domain. One incompatible value can stop every consumer of that file.</p>
+<p>That is what happened here. A desktop component on the same machine wrote <strong>service_tier = "priority"</strong> into the shared file. The installed CLI version accepted only <strong>fast</strong> or <strong>flex</strong>. It rejected the file while starting.</p>
+<p>The important detail is timing. The failure happened during configuration loading. No AI request had been sent. Authentication, rate limits, prompts, and remote services had not yet entered the path.</p>
+<h3>What Failed</h3>
+<p>The eight jobs still started on schedule. Each process read the shared configuration and exited with code 1. This continued for nine days.</p>
+<p>From the scheduler's point of view, the jobs were being launched. From the reporting system's point of view, no report was being produced. Those are different states. A launch proves only that the scheduler reached the command. It does not prove that the command completed useful work.</p>
+<p>The configuration value was not random corruption. It was valid for the component that wrote it. It was not valid for the installed CLI that later read it. Two programs shared one file but did not share the same vocabulary.</p>
+<p>The same value had broken another job on the machine about three months earlier. That clue mattered later. A repeated failure usually means the system still allows the same unsafe state to be created.</p>
+<h3>Why the Alert Was Not Enough</h3>
+<p>Every failed run sent a chat alert. At first, that sounds like monitoring worked. The alert said only that the job failed with <strong>rc=1</strong>. The related log guessed that the cause might be login trouble or a rate limit.</p>
+<p>An exit code is useful. It tells me that success cannot be claimed. It does not identify the cause. Code 1 is a broad failure signal, not a diagnosis.</p>
+<p>The real message was in stderr. It named the unsupported configuration value. However, the next run cleaned the job's working directory and deleted that stderr file. Evidence existed for a short time, but the alert did not preserve it.</p>
+<p>This created a bad debugging loop. The system reported a generic symptom. The detailed evidence disappeared. The remaining log offered a guess. That guess pointed toward remote causes even though the request had never left the machine.</p>
+<p>A good alert should separate fact from interpretation. “Exited with code 1” is a fact. “Probably login or rate limit” was an unsupported interpretation. The first error line from stderr would have been more useful than the guess.</p>
+<h3>Demo</h3>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-25-exp-13-config-line-killed-jobs/en-diagram-1.png" alt="Failure chain from shared configuration to a wrong diagnosis"></figure>
+<p><em>The observed failure chain: an unsupported shared value stopped startup, while the useful error disappeared.</em></p>
+<p>The diagram shows why the alert could be technically true and operationally weak. The job did fail. The alert did arrive. But neither helped identify the rejected setting before cleanup removed the evidence.</p>
+<p>There was also a second layer. After I removed the incompatible service-tier line, the jobs did not immediately recover. A second error became visible. The default model in the configuration was no longer supported for ChatGPT-account sign-in, and the request returned HTTP 400.</p>
+<p>This was not the same failure. The first failure happened locally during configuration parsing. The second happened after startup when the CLI attempted a request. Fixing the first blocker revealed the next one. That sequence is common in layered systems: one early failure can hide everything behind it.</p>
+<h3>The Fixes</h3>
+<p>I made three fixes that were directly supported by the failure.</p>
+<p><strong>First, I removed the unsupported setting.</strong></p>
+<p>This allowed the installed CLI to load the shared configuration again. The goal was not to make the parser more tolerant. The immediate goal was to return the file to a state every current reader could understand.</p>
+<p><strong>Second, I set a supported default model.</strong></p>
+<p>Removing the first bad line exposed the HTTP 400 response from the old default model. Selecting a supported model addressed that separate problem.</p>
+<p><strong>Third, I changed the alert to include the first ERROR line from stderr.</strong></p>
+<p>This makes the next alert carry the most relevant available evidence. It does not require sending an entire log into chat. A short, exact error line is enough to distinguish a configuration parse failure from authentication trouble, a rejected model, or another cause.</p>
+<p>The ordering also matters. The exit code remains the success contract. The stderr excerpt adds context. The alert should not replace either with a confident guess.</p>
+<h3>Discussion</h3>
+<p><strong>Shared files are small interfaces.</strong></p>
+<p>It is easy to treat a config file as passive text. In practice, it is an interface between every program that writes it and every program that reads it. Values are part of that interface. If one writer introduces a value an older reader cannot parse, the shared file becomes incompatible even when its syntax is valid.</p>
+<p><strong>Startup failures need a different debugging path.</strong></p>
+<p>If a program fails before making a request, remote explanations should move down the list. I should first ask whether the executable started, loaded its config, selected credentials, and reached the network boundary. This simple ordering avoids debugging the service before proving the client reached it.</p>
+<p><strong>Alerts must preserve evidence.</strong></p>
+<p>Temporary logs are not useful if the next scheduled run deletes them before anyone reads them. A better design would retain failed stderr safely or copy a small diagnostic excerpt into the alert. I also want the alert to name the stage: config load, local execution, request, or delivery.</p>
+<p><strong>Repeated incidents need a prevention step.</strong></p>
+<p>The same value had caused trouble months earlier. Removing it again solved the immediate incident, but repetition suggests a missing compatibility boundary. I want to validate shared configuration before scheduled jobs begin and to avoid allowing different versions to rewrite the same file without a compatibility check.</p>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>A shared config keeps common settings in one place.</li>
+<li>An exit code provides a clear pass or fail contract.</li>
+<li>A short stderr excerpt gives useful context without flooding chat.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>One incompatible line can affect every scheduled consumer.</li>
+<li>A generic alert can hide the difference between local and remote failures.</li>
+<li>Cleanup can erase the only useful evidence.</li>
+</ul>
+<h3>Conclusion</h3>
+<p>One configuration line stopped eight scheduled jobs for nine days. The jobs ran on schedule, exited with code 1, and sent alerts. Still, the alert did not contain the reason, and cleanup deleted the stderr evidence.</p>
+<p>The fix was specific: remove the unsupported setting, choose a supported default model, and include the first ERROR line from stderr in the alert. The larger lesson is that a shared configuration file is a compatibility contract. Monitoring must show where execution stopped, not only that it stopped.</p>
+<h3>Other</h3>
+<p>I want to add a preflight check that loads the configuration with the same CLI version used by the scheduled jobs. I also want failed-run evidence to survive cleanup long enough for diagnosis. These are plans, not features of the current system.</p>
+<p>A better design would also record the execution stage and the effective configuration source without exposing secrets. That would make it easier to tell whether a future failure came from parsing, model selection, authentication, the request, or result delivery.</p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+<h3>Reference</h3>
+<p><strong>OpenAI Codex documentation</strong></p>
+<p>Configuration Reference: <a href="https://developers.openai.com/codex/config-reference">https://developers.openai.com/codex/config-reference</a></p>
+<p>Config Basics: <a href="https://developers.openai.com/codex/config-file/config-basic">https://developers.openai.com/codex/config-file/config-basic</a></p>
+</body>
+</html>
