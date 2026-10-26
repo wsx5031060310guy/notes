@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body>
+<h1>Atomic File Writes: Temp File, fsync, and Rename</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-26-con-12-atomic-file-writes/en-cover.png" alt="Atomic File Writes: Temp File, fsync, and Rename"></figure>
+<p>In this blog, I will explain how a temporary file, fsync, and rename can protect a file update from becoming a torn write.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>Why in-place writes are fragile</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>A file often looks like the simplest form of persistence. I open it, write new content, and close it. This is enough when every operation finishes normally. The difficult case is interruption. The process may be killed. The machine may stop. Storage may report an error. A program that writes directly over the target can leave a file containing only part of the new data.</p>
+<p>This problem matters for configuration, local state, reports, indexes, and small data stores. The writer may fail once, but every later reader sees the damaged result. A parser then reports an unrelated syntax or format error. The original interruption is already gone, so the failure can be hard to connect to the write.</p>
+<p>The common pattern is simple: prepare the complete replacement under a temporary name, flush it, ask the operating system to synchronize it, and rename it over the target. In Python, <strong>os.replace</strong> expresses the replacement step. Each part has a separate job. None should be treated as decorative ceremony.</p>
+<h3>Overview</h3>
+<p>An atomic file update separates construction from publication. While the new content is being built, readers continue to see the old target. Only after the temporary file is complete does the writer publish it by replacing the target name.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-26-con-12-atomic-file-writes/en-diagram-1.png" alt="Flow from a stable old file to an atomically replaced new file"></figure>
+<p><em>The replacement path keeps the old file visible until the prepared file is ready.</em></p>
+<p>The sequence is:</p>
+<ol>
+<li>Create a temporary file in the same directory as the target.</li>
+<li>Write the complete new content to that temporary file.</li>
+<li>Flush language-level buffers, then call <strong>fsync</strong> on its file descriptor.</li>
+<li>Close the temporary file.</li>
+<li>Replace the target with the temporary file by using <strong>os.replace</strong>.</li>
+<li>If stronger crash durability is required on a POSIX system, synchronize the containing directory after the rename.</li>
+</ol>
+<p>Atomicity and durability are related but different. Atomicity means readers should see the old name or the new name, not a half-published mixture. Durability concerns whether a completed update survives a crash and power loss. Rename provides the publication boundary. Synchronization addresses persistence through storage layers. The exact guarantees still depend on the operating system and file system.</p>
+<h3>Why In-Place Writes Are Fragile</h3>
+<p>Suppose a program opens a target with truncation. The old content can disappear before the first new byte is written. If the process stops after writing only part of the payload, the target exists but is incomplete. A reader cannot tell whether the shorter content was intentional.</p>
+<p>Writing without truncation is not a general solution. New content may be shorter than old content, leaving stale bytes at the end. A structured file can then contain a valid new prefix followed by old data. The failure may look like corruption somewhere else in the program.</p>
+<p>Closing a file is also not the same as forcing its data to stable storage. Buffered I/O may still hold data before a flush. The kernel may also cache writes after the application has flushed its own buffer. Python documents <strong>os.fsync</strong> as forcing data associated with a file descriptor to disk. That is why a careful sequence flushes the file object before passing its descriptor to <strong>os.fsync</strong>.</p>
+<p>The temporary file should be in the same directory, not in a generic temporary directory. A generic directory may be mounted on another file system. POSIX rename does not provide the same single-operation replacement across file systems, and the operation can fail. Keeping both paths together also makes permissions and cleanup easier to reason about.</p>
+<h3>Demo</h3>
+<p>A Python implementation can stay small. The important part is the order of operations, not a large abstraction.</p>
+<blockquote>
+<p>Open a named temporary file in the target directory. Write and flush it. Call os.fsync on the open descriptor. Close it. Call os.replace with the temporary path and target path. Remove the temporary file in the failure path if it still exists.</p>
+</blockquote>
+<p>I would implement this with a try and finally block. The temporary path must remain available to cleanup code. The replacement should happen only after every write and synchronization step has succeeded. Once <strong>os.replace</strong> succeeds, cleanup must not delete the target by mistake.</p>
+<p>Metadata needs deliberate treatment. If the old target has required permissions or ownership, a replacement file may not inherit them in the way the application expects. The writer should set the intended mode on the temporary file before publication, or preserve metadata according to the program’s policy. This should be explicit rather than assumed.</p>
+<p>Serialization can fail too. It is safer to produce and validate the complete bytes before publication. For JSON, the program can serialize first and optionally parse the result before replacing the target. For a generated archive, it can reopen the temporary file and check its structure. Validation does not prove storage durability, but it prevents publishing output that the program already knows is invalid.</p>
+<h3>Discussion</h3>
+<p><strong>What rename guarantees</strong></p>
+<p>The POSIX specification says that when the destination already names a non-directory file, the destination name remains visible throughout the rename and refers either to the old file or the replacement file. This is the central property readers need. They do not have to coordinate around a moment when the target name disappears.</p>
+<p>That guarantee does not mean every storage system behaves identically. Network file systems, unusual mounts, and non-POSIX platforms can have different failure behavior. Python’s <strong>os.replace</strong> is intended to replace an existing destination, but it can fail when source and destination are on different file systems. Applications that need strict guarantees should test on the file system they deploy.</p>
+<p><strong>What fsync adds</strong></p>
+<p>Flushing a Python file object moves buffered data toward the operating system. Calling <strong>os.fsync</strong> asks the operating system to force the file’s data to disk. For crash-oriented designs on POSIX, many implementations also open and synchronize the parent directory after rename so the directory entry update is persisted. This extra step is about durability, not about making the rename itself atomic.</p>
+<p><strong>Cleanup after failure</strong></p>
+<p>If writing, flushing, or replacement fails, the old target should remain the authoritative version. The code should close handles and delete only the abandoned temporary file. Cleanup errors should not hide the original exception. A unique temporary name also avoids two writers accidentally sharing one staging path.</p>
+<p>Concurrent writers require a policy. Atomic replacement prevents torn publication, but it does not decide which writer should win. Without locking or version checks, the last successful replacement wins. If lost updates matter, the design needs coordination in addition to atomic file writes.</p>
+<p><strong>How to test it</strong></p>
+<p>A useful test starts with a known old target. Inject a failure after only part of the new content has been written to the temporary file. Then verify that the original target is unchanged and readable. The test should also check that abandoned temporary files are removed.</p>
+<p>Another test can fail the replacement call. Again, the target should retain the old content. A success test should confirm that the complete new content appears. These tests focus on the contract visible to readers. Testing sudden machine power loss needs a stronger environment, but deterministic failure injection still catches ordering and cleanup mistakes.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>Readers see a complete old file or a complete new file.</li>
+<li>A failed write does not normally destroy the current target.</li>
+<li>The pattern is small and works for many local file formats.</li>
+<li>Failure injection gives the behavior a clear, testable contract.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>The update temporarily needs space for both versions.</li>
+<li>Permissions and other metadata need explicit handling.</li>
+<li>Atomic replacement alone does not prevent lost updates between writers.</li>
+<li>Durability details vary by platform and file system.</li>
+<li>This pattern is not a replacement for a database when transactions span multiple files or records.</li>
+</ul>
+<h3>Conclusion</h3>
+<p>An in-place write exposes the target while it is incomplete. A temporary file changes the model: build privately, validate, synchronize, and publish once. The rename is the commit point. Readers keep a stable name and avoid seeing a partially constructed replacement.</p>
+<p>I use the pattern as a design rule for important local state: never destroy the known-good version before the replacement is ready. I also separate atomic visibility from crash durability. The first comes from same-file-system replacement. The second needs careful synchronization and platform-specific testing.</p>
+<h3>Other</h3>
+<p>I want to try a small reusable Python helper with injectable failure points after write, after flush, and before replace. I also want tests that run on the actual file systems used by an application. A better design would expose metadata policy, concurrent-writer policy, and durability level as explicit choices instead of hiding them behind one function name.</p>
+<h3>Reference</h3>
+<p><strong>Python documentation</strong></p>
+<p>os — Miscellaneous operating system interfaces: <a href="https://docs.python.org/3/library/os.html">https://docs.python.org/3/library/os.html</a></p>
+<p><strong>The Open Group</strong></p>
+<p>rename, renameat — POSIX specification: <a href="https://pubs.opengroup.org/onlinepubs/9699919799/functions/rename.html">https://pubs.opengroup.org/onlinepubs/9699919799/functions/rename.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
