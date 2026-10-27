@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>A Half-Saved Spreadsheet Quietly Emptied My Watchlist for Five Days</title></head>
+<body>
+<h1>A Half-Saved Spreadsheet Quietly Emptied My Watchlist for Five Days</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-27-exp-14-half-saved-spreadsheet/en-cover.png" alt="A Half-Saved Spreadsheet Quietly Emptied My Watchlist for Five Days"></figure>
+<p>A file can still exist, have a familiar name, and quietly stop being valid data.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>What the job was doing</li>
+<li>How one interrupted save broke later runs</li>
+<li>Recovery</li>
+<li>The fix</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>In this blog, I will describe how an interrupted spreadsheet save caused a daily automation job to follow zero accounts for five days. The file was not deleted. The job still started. Its error was even written to the log. But one function converted a damaged workbook into an empty watchlist, so the rest of the workflow had nothing to do.</p>
+<p>This happened in a daily lead-collection job. The job appended rows to an <strong>.xlsx</strong> file stored on an external exFAT disk. Another function read the same workbook and built the list of accounts to follow. That design made the spreadsheet both an output and an input. A partial write therefore affected more than the current save. It changed the behavior of every later run.</p>
+<p>The important lesson is not only about Excel files. Any structured file can become a hidden dependency. If a reader treats corruption as “no records,” a storage failure can look like a valid empty result.</p>
+<h3>What the Job Was Doing</h3>
+<p>The workflow had two related paths. One path collected leads and appended them to a workbook. The other path read the workbook and produced a watchlist. Both depended on the same file being readable.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-27-exp-14-half-saved-spreadsheet/en-diagram-1.png" alt="How the interrupted spreadsheet save turned into an empty watchlist"></figure>
+<p><em>The failure path: an interrupted save damaged the workbook, and a caught read error became an empty watchlist.</em></p>
+<p>This arrangement was convenient because the workbook was easy to inspect. It also created coupling. Writing and reading were no longer independent operations. If the write damaged the file, the next read could not build the list.</p>
+<p>An <strong>.xlsx</strong> workbook is not one flat table. It is a ZIP archive containing XML files and related metadata. A ZIP archive uses a central directory near the end of the file to describe its entries. If that ending is incomplete, a normal workbook reader may no longer recognize the archive even when much of the worksheet content remains inside.</p>
+<h3>How One Interrupted Save Broke Later Runs</h3>
+<p>One save was interrupted part-way through. The end of the workbook, where the ZIP central directory is kept, was left as zero bytes. The file remained on disk, but it was no longer a valid archive for the normal reader.</p>
+<p>Every later append attempt logged <strong>File is not a zip file</strong>. That message was accurate. The dangerous behavior happened in the watchlist function. It caught the exception and returned an empty list.</p>
+<p>Returning an empty list prevented a crash, but it changed the meaning of the failure. “I could not read the source” became “the source contains no accounts.” The job then continued with a normal data structure. For five days, it followed zero accounts.</p>
+<p>This is a common boundary problem. An exception describes an operational failure. An empty collection describes a valid result. They are not interchangeable. A caller may reasonably interpret an empty list as “there is no work today.” It cannot know that the reader actually failed unless the failure is preserved or reported clearly.</p>
+<p>The log contained the workbook error, but the workflow did not make the empty output suspicious. The job was able to run without producing the intended effect.</p>
+<h3>Recovery</h3>
+<p>The workbook was damaged, but the worksheet XML parts were still intact. The cells used inline strings, which made the remaining content directly recoverable from the XML. I rebuilt every row: 2,593 rows in one sheet and 1,450 rows in the other. I preserved the same dedupe keys as before. The rebuilt workbook produced 59 accounts again.</p>
+<p>This distinction matters during recovery. A container can be unreadable while some of its payload is still present. The right first question is not only “Can Excel open it?” It is also “Which archive entries and XML parts still exist?” Recovery should avoid overwriting the damaged original while that question is being answered.</p>
+<p>I also used <strong>zip -FF</strong> to recover archive entries. It did recover the entries, but it waited for an interactive question until it received <strong>yes</strong>. That behavior is important in automation. A command that works in a terminal may wait forever in an unattended job if it expects input.</p>
+<p>The recovered row counts and the restored 59-account result provided concrete checks. Recovery was not complete merely because a new workbook could open. It had to preserve the rows, dedupe keys, and the downstream list that the job depended on.</p>
+<h3>The Fix</h3>
+<p>The fix was to stop saving directly over the only good copy. The job now saves to a temporary file in the same folder and then replaces the original with <strong>os.replace</strong>.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-27-exp-14-half-saved-spreadsheet/en-diagram-2.png" alt="The atomic replacement flow used to protect the previous spreadsheet"></figure>
+<p><em>The implemented fix: write and validate a temporary workbook, then replace the target with os.replace.</em></p>
+<p>The temporary file must be in the same folder. Keeping it there allows the replacement to stay on the same filesystem. The old workbook remains in place while the new content is being written. Only after the temporary workbook is complete does the replacement happen.</p>
+<p>If writing the temporary file fails, the existing workbook remains unchanged. The temporary file can be removed, and the next run still has the previous valid data. This does not make every storage problem disappear, but it removes the dangerous period where the application is rewriting its only copy in place.</p>
+<p>I also added a test that simulates a failure in the middle of a save. The test checks that the old file is unchanged. This test focuses on the property I need, not only on whether the happy path can create a workbook.</p>
+<h3>Discussion</h3>
+<p><strong>Do not convert corruption into emptiness</strong></p>
+<p>A reader can return an empty list when it successfully reads a valid source with no rows. It should not return the same value when parsing fails. A better interface would keep those states separate. It could raise the error, return an explicit failure result, or stop the job before downstream actions begin.</p>
+<p><strong>Verify the effect, not only the process</strong></p>
+<p>A scheduled process starting on time is weak evidence. A useful check should ask whether the expected output was produced. In this case, a zero-account watchlist was possible as a data value, but it should have been unusual enough to inspect when paired with a workbook read error.</p>
+<p><strong>Keep recovery tools out of the normal write path</strong></p>
+<p>Archive repair was useful after the incident. It is not a substitute for safe writes. Recovery tools may be interactive, may change damaged content, and may not preserve every relationship inside a complex workbook. The normal system should protect the last good copy before recovery becomes necessary.</p>
+<p><strong>External storage does not change the application contract</strong></p>
+<p>The workbook was on an external exFAT disk. Regardless of the storage location, the application still needed a clear contract: either the previous complete workbook or the next complete workbook should be visible. An in-place save exposed an incomplete state. Temporary-file replacement gives the application a safer boundary.</p>
+<h3>Conclusion</h3>
+<p>This incident began with one interrupted save and lasted for five days because later code translated a read failure into an empty list. The file existed, the job ran, and the workflow did not crash at the point where the empty result was consumed. Those signals looked calmer than the real state.</p>
+<p>The workbook was recoverable because its worksheet XML remained intact. I rebuilt 2,593 rows in one sheet and 1,450 in the other, preserved the dedupe keys, and restored a watchlist of 59 accounts. The lasting fix was simpler than the recovery: write a temporary workbook in the same folder, then replace the original with <strong>os.replace</strong>.</p>
+<p>For file-backed automation, “empty” should mean the source was read successfully and contained nothing. It should never be the quiet translation of “I could not read the source.”</p>
+<h3>Other</h3>
+<p>I want to add a clearer distinction between a valid empty workbook and a failed workbook read. I also want the job to report the source-read failure close to the final outcome, so a normal start does not hide missing work.</p>
+<p>A further improvement would be to validate the temporary workbook before replacement and keep a limited backup of the last known-good file. These are plans, not features of the current workflow described here.</p>
+<h3>Reference</h3>
+<p><strong>Python file operations</strong></p>
+<p>os — Miscellaneous operating system interfaces: <a href="https://docs.python.org/3/library/os.html">https://docs.python.org/3/library/os.html</a></p>
+<p><strong>Python ZIP archives</strong></p>
+<p>zipfile — Work with ZIP archives: <a href="https://docs.python.org/3/library/zipfile.html">https://docs.python.org/3/library/zipfile.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
