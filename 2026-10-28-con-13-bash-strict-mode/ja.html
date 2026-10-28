@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"></head>
+<body>
+<h1>Bash の strict mode：set -euo pipefail が検出できること、できないこと</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/ja-cover.png" alt="Bash の strict mode と、検出できる失敗・できない失敗"></figure>
+<p>この記事では、<strong>set -euo pipefail</strong> が Bash の動作をどう変えるのか、どこまで守ってくれるのか、そして信頼できるスクリプトにどのような明示的な確認が必要なのかを説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul>
+<li>はじめに</li>
+<li>概要</li>
+<li>set -e の動作</li>
+<li>set -u の動作</li>
+<li>pipefail の動作</li>
+<li>デモ</li>
+<li>考察</li>
+<li>利点と欠点</li>
+<li>まとめ</li>
+<li>今後</li>
+<li>参考</li>
+</ul>
+<h3>はじめに</h3>
+<p>シェルスクリプトの先頭には、次の短い一行がよく置かれます。</p>
+<blockquote><p>set -euo pipefail</p></blockquote>
+<p>一般には「strict mode」と呼ばれますが、Bash がその名前の機能を正式に定義しているわけではありません。この行は三つの独立した動作を有効にします。<strong>-e</strong> は <strong>errexit</strong>、<strong>-u</strong> は <strong>nounset</strong>、<strong>set -o pipefail</strong> はパイプラインの終了ステータスを変更します。便利なミスを検出できますが、Bash のすべてのエラーを例外へ変えるものではありません。</p>
+<p>重要なのは、Bash が人間の意図ではなく、終了ステータスと展開規則に反応することです。間違った結果を出しても終了ステータスがゼロのコマンドはあります。<strong>-e</strong> が意図的に無視される構文上の場所もあります。デフォルト値が設定不足を隠す場合もあります。strict mode はガードレールであり、スクリプトの正しさの証明ではありません。</p>
+<h3>概要</h3>
+<p>一つの呪文として覚えるより、三つのスイッチとして理解すると分かりやすくなります。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/ja-diagram-1.png" alt="Bash strict mode の三つのスイッチと、それぞれが変える動作"></figure>
+<p><em>各スイッチは、コマンドの状態、未設定変数の展開、パイプラインの状態という別々の信号を扱います。</em></p>
+<ul>
+<li><strong>set -e</strong> は、単純コマンドや複合コマンドがゼロ以外を返したとき、文書化された例外を除いて終了させることがあります。</li>
+<li><strong>set -u</strong> は、未設定パラメーターの展開をエラーとして扱います。特殊パラメーターには文書化された扱いがあります。</li>
+<li><strong>set -o pipefail</strong> は、通常のように最後のコマンドだけを見るのではなく、途中のコマンドが失敗したパイプラインを失敗として報告できるようにします。</li>
+</ul>
+<p>スクリプトは変数とパイプラインを多用するため、三つのオプションは一緒に使うと有効です。ただし、どれにも境界があります。信頼できるスクリプトは、先頭の一行ですべてを処理できると考えず、その境界をコード上で見えるようにします。</p>
+<h3>set -e の動作</h3>
+<p><strong>-e</strong> を有効にすると、パイプライン、リスト、複合コマンドがゼロ以外の終了ステータスを返したときに Bash は終了します。ただし、マニュアルはいくつかの例外を定めています。シェル構文はコマンドの成否を真偽値として利用するため、これらの例外が必要です。</p>
+<p><strong>if</strong> の条件として使うコマンドは、成功または失敗を返すことが想定されています。Bash はその結果で分岐を選ぶ必要があるため、条件が偽というだけで <strong>-e</strong> は終了しません。同じ理由で、<strong>while</strong> と <strong>until</strong> の条件コマンドも例外です。</p>
+<p><strong>&amp;&amp;</strong> と <strong>||</strong> のリストも重要な例外です。<strong>prepare &amp;&amp; deploy</strong> では、prepare の失敗が deploy を実行するかどうかを決めます。<strong>load_cache || rebuild_cache</strong> では、最初の失敗が代替処理を選びます。そのため Bash は、最後の <strong>&amp;&amp;</strong> または <strong>||</strong> の後にあるコマンドを除き、これらのリスト内のコマンドへ <strong>-e</strong> を適用しません。パイプラインの最後以外のコマンドも基本の <strong>-e</strong> 規則から除かれ、<strong>!</strong> で反転した状態も制御フローとして扱われます。</p>
+<p>つまり、「コマンドが失敗した」と「スクリプトが終了する」は同じではありません。構文上の文脈が重要です。必ず停止すべき失敗なら、直接確認して、明確なメッセージとともに return または exit します。行数を減らすためだけに、すべてを <strong>&amp;&amp;</strong> の連鎖へ変えるべきではありません。</p>
+<h3>set -u の動作</h3>
+<p><strong>-u</strong> を有効にすると、未設定変数の展開は通常エラーになります。変数名の入力ミスや入力不足を早い段階で検出できます。無効の場合、未設定変数は空文字列へ展開されることが多く、パス、コマンド引数、設定値を意図しない状態にする可能性があります。</p>
+<p>波括弧を使うと変数名の境界が明確になります。値の直後に文字が続く場合は <strong>${VAR}</strong> と書きます。たとえば <strong>${name}_backup</strong> はパラメーター <strong>name</strong> を展開してから接尾辞を追加します。<strong>$name_backup</strong> と書くと、Bash は別のパラメーター <strong>name_backup</strong> を探します。波括弧が <strong>-u</strong> を有効にするわけではありません。意図しないパラメーター名を防ぎ、レビューしやすくするものです。</p>
+<p>値がないときに正当なデフォルトを使える場合もあります。Bash のパラメーター展開では <strong>${VAR:-default}</strong> を使用できます。コロン付きの形式は、<strong>VAR</strong> が未設定または空文字列のときにデフォルトを使います。一方、<strong>${VAR-default}</strong> は未設定のときだけデフォルトを使います。空文字列自体に意味がある場合、この違いは重要です。</p>
+<p>デフォルト値は方針を表すべきであり、すべてのエラーを黙らせるためのものではありません。表示ラベルには安全な代替値があるかもしれません。しかし、出力先ディレクトリ、認証情報名、環境の選択には必須チェックが必要な場合があります。値なしで続けるのが危険なら、Bash のエラー形式 <strong>${VAR:?message}</strong> も使えます。</p>
+<h3>pipefail の動作</h3>
+<p>通常、パイプラインの終了ステータスは最後のコマンドの状態です。<strong>generate_report</strong> が失敗しても、その出力を受け取る formatter が正常終了すると、パイプライン全体が成功を報告する可能性があります。その結果、不完全または空の入力を生成したコマンドが隠れます。</p>
+<p><strong>pipefail</strong> を有効にすると、パイプラインの終了ステータスは、ゼロ以外で終了した最も右側のコマンドの値になります。すべて成功した場合はゼロです。コマンドを逐次実行に変えるわけでも、失敗理由を文章で説明するわけでもありません。周囲のシェルロジックが受け取る最終ステータスを変えます。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/ja-diagram-2.png" alt="pipefail が無効な場合と有効な場合のパイプライン終了ステータスの比較"></figure>
+<p><em>pipefail がなければ最後のコマンドが決めます。有効なら、途中のゼロ以外の状態をパイプラインの結果へ残せます。</em></p>
+<p><strong>-e</strong> と <strong>pipefail</strong> の両方が有効なら、処理されていないパイプラインの失敗でスクリプトを止められます。ただし、<strong>-e</strong> の構文上の例外はそのままです。たとえば <strong>if</strong> の条件にしたパイプラインは意図的にテストされているため、自動的には終了しません。</p>
+<h3>デモ</h3>
+<p>実用的なスクリプトでは、先頭付近でオプションを有効にし、想定内の失敗を明示します。</p>
+<blockquote><p>set -euo pipefail を有効にします。出力先は ${OUTPUT_DIR:?OUTPUT_DIR is required} で必須にします。任意の形式は ${FORMAT:-text} で読みます。生成側と formatter を一つのパイプラインとして実行します。失敗する可能性がある probe は if 文に置き、偽の場合の処理を明示します。</p></blockquote>
+<p>この構造は三つのケースを分けます。必須設定は分かりやすいメッセージで失敗します。任意設定には文書化されたデフォルトが入ります。ゼロ以外が想定される probe は、見える制御フローになります。主要なパイプラインでは <strong>pipefail</strong> が働き、生成側の失敗が最後の filter の成功に隠れません。</p>
+<p>パイプラインを調べる場合は、すぐに状態を保存します。Bash は直前の foreground pipeline の各状態を <strong>PIPESTATUS</strong> 配列で公開します。後続のコマンドは <strong>$?</strong> と同様にこの情報を置き換えるため、別の処理より先に確認する必要があります。</p>
+<h3>考察</h3>
+<p><strong>strict mode が得意なこと</strong></p>
+<p>通常の流れにある未処理のゼロ以外のコマンド、未設定変数の展開、最後のコマンドの成功で隠れたパイプライン前半の失敗など、機械的なミスを見える失敗へ変えるのが得意です。シェルの既定動作は寛容なことが多いため、これらは価値のある確認です。</p>
+<p><strong>検出できないこと</strong></p>
+<p>終了ステータスがゼロでも、データが間違っているコマンドは検出できません。空の結果が異常だと判断することもできません。パスの意味、リモートの副作用が実際に起きたか、ファイルに期待したレコードがあるかも検証しません。これらはスクリプトのドメインルールで確認する必要があります。</p>
+<p>制御構文の理解も不要にはなりません。<strong>if</strong>、<strong>while</strong>、<strong>until</strong>、<strong>&amp;&amp;</strong>、<strong>||</strong> は意図的にステータスを利用します。関数、subshell、command substitution、trap、シェルオプションの継承にも追加の挙動があります。依存する場合は、対象を絞ったテストが必要です。</p>
+<p><strong>テスト方法</strong></p>
+<p>成功だけでなく、各失敗経路を試します。必須変数を未設定にし、次に空文字列にします。パイプラインの最初と途中のコマンドを失敗させます。<strong>if</strong> の条件、および <strong>&amp;&amp;</strong> と <strong>||</strong> の両側でゼロ以外を返します。最終的な終了ステータスと、呼び出し側が受け取る後始末やメッセージを確認します。</p>
+<p><strong>bash -n</strong> で構文を確認し、shell の解析ツールで追加の警告も調べます。ただし、動作テストは残します。構文検査や lint は、成功したコマンドが業務上正しい結果を出したかまでは判断できません。</p>
+<h3>利点と欠点</h3>
+<p><strong>利点</strong></p>
+<ul>
+<li>未設定変数が展開箇所の近くで失敗します。</li>
+<li>途中の失敗が、最後のコマンドの成功に隠れにくくなります。</li>
+<li>通常の流れにある未処理の失敗で早く停止できます。</li>
+<li>先頭のオプションが、厳しい失敗方針を読み手へ伝えます。</li>
+</ul>
+<p><strong>欠点</strong></p>
+<ul>
+<li><strong>-e</strong> は文脈依存で、過度に単純化して説明されがちです。</li>
+<li>正当な空値や未設定値には、意図的なパラメーター展開が必要です。</li>
+<li>想定内のゼロ以外は、制御フローとして表現する必要があります。</li>
+<li>既存スクリプトへの導入では、隠れた前提が見つかり、慎重な修正が必要になります。</li>
+<li>どのオプションも、出力や副作用の検証を置き換えられません。</li>
+</ul>
+<h3>まとめ</h3>
+<p><strong>set -euo pipefail</strong> は、三つの異なる場所で寛容な既定動作を変えるため有用です。多くの未処理の失敗で停止し、未設定値の展開を拒否し、パイプライン前半の失敗を残せます。新しい Bash スクリプトの強い出発点になります。</p>
+<p>安全な理解は「strict mode がすべてのエラーを検出する」ではなく、「重要ないくつかのエラーを無視しにくくする」です。波括弧で変数名を区切り、本当に有効な場合だけデフォルトを使い、想定内の失敗を明示的な分岐として書きます。そして <strong>-e</strong> が終了しない文脈をテストします。最終的に重要な結果には、別の確認が必要です。</p>
+<h3>今後</h3>
+<p>重要なスクリプトには、小さな失敗マトリクスを残したいです。未設定入力、空入力、producer の失敗、filter の失敗、偽の条件、未完了の副作用を並べます。これにより、オプションを別のスクリプトからコピーした一行ではなく、テスト可能な動作として扱えます。</p>
+<h3>参考</h3>
+<p><strong>GNU Bash Manual</strong></p>
+<p>Bourne Shell Builtins — set と各オプション: <a href="https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin">https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin</a></p>
+<p>Pipelines — パイプラインの終了ステータスと pipefail: <a href="https://www.gnu.org/software/bash/manual/bash.html#Pipelines">https://www.gnu.org/software/bash/manual/bash.html#Pipelines</a></p>
+<p>Shell Parameter Expansion — 波括弧、デフォルト、必須値: <a href="https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion">https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

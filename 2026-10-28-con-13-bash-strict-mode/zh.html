@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"></head>
+<body>
+<h1>Bash 嚴格模式：set -euo pipefail 能抓到什麼，又漏掉什麼</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/zh-cover.png" alt="Bash 嚴格模式與它能抓到及無法抓到的失敗"></figure>
+<p>這篇文章會說明 <strong>set -euo pipefail</strong> 如何改變 Bash 的行為、保護範圍到哪裡，以及可靠的腳本仍然需要哪些明確檢查。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li>
+<li>概觀</li>
+<li>set -e 做了什麼</li>
+<li>set -u 做了什麼</li>
+<li>pipefail 做了什麼</li>
+<li>示範</li>
+<li>討論</li>
+<li>優點與缺點</li>
+<li>結論</li>
+<li>其他</li>
+<li>參考資料</li>
+</ul>
+<h3>前言</h3>
+<p>Shell 腳本常在開頭放入一行簡短設定：</p>
+<blockquote><p>set -euo pipefail</p></blockquote>
+<p>大家常把它稱為「嚴格模式」，但 Bash 並沒有用這個正式名稱定義一項功能。這一行其實啟用了三種彼此獨立的行為。<strong>-e</strong> 是 <strong>errexit</strong>，<strong>-u</strong> 是 <strong>nounset</strong>，而 <strong>set -o pipefail</strong> 會改變 pipeline 回報結束狀態的方式。它們能抓到一些很有用的錯誤，卻不會把 Bash 變成每個錯誤都自動成為例外的語言。</p>
+<p>關鍵在於 Bash 回應的是結束狀態與展開規則，而不是人類的意圖。命令可能產生錯誤結果，卻仍回傳零。失敗也可能位於 <strong>-e</strong> 刻意忽略的語法情境。預設值還可能掩蓋遺漏的設定。嚴格模式是護欄，不是腳本正確性的證明。</p>
+<h3>概觀</h3>
+<p>把這一行拆成三個開關，比把它當成一段咒語更容易理解。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/zh-diagram-1.png" alt="Bash 嚴格模式的三個開關及各自改變的行為"></figure>
+<p><em>每個開關處理不同訊號：命令狀態、未設定變數的展開，或 pipeline 狀態。</em></p>
+<ul>
+<li><strong>set -e</strong> 可能在簡單命令或複合命令回傳非零狀態時離開，但有手冊明定的例外。</li>
+<li><strong>set -u</strong> 把未設定參數的展開視為錯誤；特殊參數另有手冊明定的處理方式。</li>
+<li><strong>set -o pipefail</strong> 讓 pipeline 中任一命令失敗時能回報失敗，而不是像預設行為一樣只採用最後一個命令的狀態。</li>
+</ul>
+<p>許多腳本都會透過變數與 pipeline 傳遞資料，所以這三個選項一起使用很有效。不過，每個選項都有邊界。可靠的腳本會把這些邊界寫清楚，而不是假設開頭那一行可以處理所有控制流程。</p>
+<h3>set -e 做了什麼</h3>
+<p>啟用 <strong>-e</strong> 後，當 pipeline、list 或 compound command 回傳非零狀態時，Bash 會離開，但手冊定義了幾個例外。這些例外有其必要性，因為 shell 語法會把命令的結束狀態當成布林值使用。</p>
+<p>放在 <strong>if</strong> 後面作為條件的命令，本來就預期可能成功或失敗。Bash 必須檢查該狀態來選擇分支，所以不會只因條件為假就讓 <strong>-e</strong> 結束腳本。相同道理也適用於 <strong>while</strong> 與 <strong>until</strong> 的條件命令。</p>
+<p><strong>&amp;&amp;</strong> 與 <strong>||</strong> list 是另一個重要例外。在 <strong>prepare &amp;&amp; deploy</strong> 中，prepare 失敗會決定是否執行 deploy。在 <strong>load_cache || rebuild_cache</strong> 中，第一個命令失敗會選擇備援流程。因此，除了最後一個 <strong>&amp;&amp;</strong> 或 <strong>||</strong> 後方的命令外，Bash 不會對這些 list 裡的命令套用 <strong>-e</strong>。pipeline 中不是最後一個的命令也不適用基本的 <strong>-e</strong> 規則；使用 <strong>!</strong> 反轉的狀態則會被當成控制流程。</p>
+<p>這表示「命令失敗」不等於「腳本離開」。語法情境很重要。如果某個失敗一定要終止操作，就應直接檢查，並用清楚的訊息 return 或 exit。不要只是為了少寫幾行，就把命令全部重排成 <strong>&amp;&amp;</strong> 鏈。</p>
+<h3>set -u 做了什麼</h3>
+<p>啟用 <strong>-u</strong> 後，展開未設定變數通常會成為錯誤。它可以提早抓到拼錯的名稱和遺漏的輸入。若未啟用，未設定變數通常會展開成空字串，讓路徑、命令參數或設定值朝錯誤方向前進。</p>
+<p>大括號可以明確界定變數名稱。當值後方還有其他字元時，請寫成 <strong>${VAR}</strong>。例如 <strong>${name}_backup</strong> 會展開參數 <strong>name</strong>，再加上後綴。若寫成 <strong>$name_backup</strong>，Bash 會尋找另一個名為 <strong>name_backup</strong> 的參數。不是大括號啟用了 <strong>-u</strong>；它的作用是避免模糊或非預期的參數名稱，也讓審查更安全。</p>
+<p>有時缺少值時確實可以使用合理的預設值。Bash 的參數展開提供 <strong>${VAR:-default}</strong>。有冒號的形式會在 <strong>VAR</strong> 未設定或設為空字串時使用預設值。相較之下，<strong>${VAR-default}</strong> 只在參數未設定時使用預設值。當空字串本身代表一個刻意選擇時，這項差異很重要。</p>
+<p>預設值應該表達政策，而不是消除所有錯誤。顯示名稱或許可以有無害的備用值；輸出目錄、憑證名稱或環境選擇則可能必須明確要求。若缺少值時繼續執行並不安全，Bash 也提供 <strong>${VAR:?message}</strong> 這種錯誤形式。</p>
+<h3>pipefail 做了什麼</h3>
+<p>在預設情況下，pipeline 的結束狀態是最後一個命令的狀態。假如 <strong>generate_report</strong> 失敗，但接收其輸出的 formatter 成功離開，整條 pipeline 仍可能回報成功。這會掩蓋產生不完整或空白輸入的命令。</p>
+<p>啟用 <strong>pipefail</strong> 後，pipeline 狀態會是最右側、以非零狀態離開之命令的值；若所有命令都成功，狀態就是零。它不會把命令改成逐一執行，也不會用文字指出失敗原因。它改變的是外層 shell 邏輯收到的最終狀態。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/zh-diagram-2.png" alt="停用與啟用 pipefail 時的 pipeline 結束狀態比較"></figure>
+<p><em>沒有 pipefail 時由最後一個命令決定；啟用後，非零狀態可以保留到整條 pipeline 的結果。</em></p>
+<p>同時啟用 <strong>-e</strong> 與 <strong>pipefail</strong> 時，沒有被處理的 pipeline 失敗可以停止腳本。不過，<strong>-e</strong> 的語法例外仍然存在。例如，作為 <strong>if</strong> 條件的 pipeline 正在被刻意測試，因此不會自動終止腳本。</p>
+<h3>示範</h3>
+<p>實際腳本可以在靠近開頭的位置啟用選項，再把預期中的失敗明確寫出來。</p>
+<blockquote><p>啟用 set -euo pipefail。用 ${OUTPUT_DIR:?OUTPUT_DIR is required} 讀取必要的輸出目錄。用 ${FORMAT:-text} 讀取選填格式。把 producer 與 formatter 當成一條 pipeline 執行。將允許失敗的 probe 放進 if 敘述，並明確處理其 false 分支。</p></blockquote>
+<p>這個結構分開三種情況。必要設定會附帶實用訊息而失敗。選填設定會取得文件化的預設值。可能合理回傳非零狀態的 probe 會成為清楚可見的控制流程。主要 pipeline 則受惠於 <strong>pipefail</strong>，所以前段 producer 的失敗不會被最後一個 filter 的成功掩蓋。</p>
+<p>偵錯 pipeline 時，請立刻保存狀態。Bash 透過 <strong>PIPESTATUS</strong> 陣列公開最近一條 foreground pipeline 中各命令的狀態。任何後續命令都可能像覆蓋 <strong>$?</strong> 一樣覆蓋這項資訊，所以必須在執行其他工作前檢查。</p>
+<h3>討論</h3>
+<p><strong>嚴格模式擅長抓到什麼</strong></p>
+<p>它很適合把常見的機械性錯誤轉成明顯失敗，例如一般流程中未處理的非零命令、未設定變數的展開，或被 pipeline 最後一個成功命令掩蓋的前段失敗。因為 shell 的預設行為通常很寬鬆，這些檢查相當有價值。</p>
+<p><strong>它抓不到什麼</strong></p>
+<p>嚴格模式無法發現回傳零卻產生錯誤資料的命令。它不知道空白結果是否可疑，也不會驗證路徑的語意、遠端副作用是否真的發生，或檔案是否包含預期紀錄。這些檢查必須來自腳本的領域規則。</p>
+<p>它也不會消除理解控制情境的必要性。<strong>if</strong>、<strong>while</strong>、<strong>until</strong>、<strong>&amp;&amp;</strong> 與 <strong>||</strong> 都會刻意消費結束狀態。函式、subshell、command substitution、trap 與 shell 選項繼承還會加入更多行為。腳本若依賴這些特性，就應針對它們測試。</p>
+<p><strong>如何測試</strong></p>
+<p>不要只測成功流程，也要測每一條失敗路徑。先讓必要變數未設定，再把它設成空字串。讓 pipeline 的第一個與中間命令分別失敗。在 <strong>if</strong> 條件，以及 <strong>&amp;&amp;</strong> 或 <strong>||</strong> list 的兩側回傳非零狀態。確認最終結束狀態，以及呼叫端收到的清理結果或訊息。</p>
+<p>用 <strong>bash -n</strong> 執行語法檢查，並使用 shell 分析工具取得額外警告，但仍要保留行為測試。語法與 lint 無法判斷成功命令是否產生了正確的業務結果。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul>
+<li>未設定變數會在接近展開位置的地方失敗。</li>
+<li>pipeline 的失敗較不容易消失在最後一個成功命令後方。</li>
+<li>一般流程中未處理的命令失敗可以更早停止腳本。</li>
+<li>開頭的選項能向讀者傳達較嚴格的失敗政策。</li>
+</ul>
+<p><strong>缺點</strong></p>
+<ul>
+<li><strong>-e</strong> 會受語法情境影響，也很容易被過度簡化。</li>
+<li>合法的空值或缺值需要刻意選擇參數展開方式。</li>
+<li>預期中的非零狀態必須寫成控制流程。</li>
+<li>既有腳本可能會暴露原本隱藏的假設，需要謹慎遷移。</li>
+<li>沒有任何選項能取代對輸出與副作用的驗證。</li>
+</ul>
+<h3>結論</h3>
+<p><strong>set -euo pipefail</strong> 很實用，因為它在三個不同位置改變 Bash 寬鬆的預設行為。它可以在許多未處理的失敗時停止、拒絕未設定變數展開，並保留 pipeline 前段的失敗。對新的 Bash 腳本而言，這是一個很好的起點。</p>
+<p>安全的結論不是「嚴格模式抓得到每個錯誤」，而是「嚴格模式讓幾種重要錯誤更難被忽略」。用大括號界定變數名稱，只在預設值真的有效時使用它，把預期中的失敗寫成明確分支，並測試 <strong>-e</strong> 不會離開的情境。腳本仍然需要檢查真正重要的結果。</p>
+<h3>其他</h3>
+<p>我想在重要腳本旁保留一份小型失敗矩陣：未設定輸入、空白輸入、producer 失敗、filter 失敗、false 條件，以及未成功的副作用。這能讓選項成為可測試的行為，而不是從另一支腳本複製來的一行文字。</p>
+<h3>參考</h3>
+<p><strong>GNU Bash Manual</strong></p>
+<p>Bourne Shell Builtins — set 與各選項: <a href="https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin">https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin</a></p>
+<p>Pipelines — pipeline 結束狀態與 pipefail: <a href="https://www.gnu.org/software/bash/manual/bash.html#Pipelines">https://www.gnu.org/software/bash/manual/bash.html#Pipelines</a></p>
+<p>Shell Parameter Expansion — 大括號、預設值與必要值: <a href="https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion">https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

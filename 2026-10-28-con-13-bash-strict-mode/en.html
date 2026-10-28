@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"></head>
+<body>
+<h1>Bash Strict Mode: What set -euo pipefail Does and Does Not Catch</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/en-cover.png" alt="Bash strict mode and the failures it can and cannot catch"></figure>
+<p>In this blog, I will explain what <strong>set -euo pipefail</strong> changes in Bash, where its protection stops, and which explicit checks still belong in a reliable script.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>What set -e does</li>
+<li>What set -u does</li>
+<li>What pipefail does</li>
+<li>Demo</li>
+<li>Discussion</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>Shell scripts often begin with one compact line:</p>
+<blockquote><p>set -euo pipefail</p></blockquote>
+<p>People call this “strict mode,” although Bash does not define a feature with that official name. The line enables three separate behaviors. <strong>-e</strong> is <strong>errexit</strong>, <strong>-u</strong> is <strong>nounset</strong>, and <strong>set -o pipefail</strong> changes how a pipeline reports status. They catch useful classes of mistakes, but they do not turn Bash into a language where every error automatically becomes an exception.</p>
+<p>The important idea is that Bash reacts to exit status and expansion rules, not to human intent. A command can return zero while producing the wrong result. A failure can appear in a syntax context where <strong>-e</strong> is intentionally ignored. A default value can hide missing configuration. Strict mode is a guardrail, not proof that a script is correct.</p>
+<h3>Overview</h3>
+<p>It is easier to understand the line as three switches instead of one spell.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/en-diagram-1.png" alt="Three Bash strict mode switches and the behavior each one changes"></figure>
+<p><em>Each switch covers a different signal: command status, unset expansion, or pipeline status.</em></p>
+<ul>
+<li><strong>set -e</strong> may exit when a simple command or compound command returns a non-zero status, subject to documented exceptions.</li>
+<li><strong>set -u</strong> treats expansion of an unset parameter as an error, with documented handling for special parameters.</li>
+<li><strong>set -o pipefail</strong> makes a pipeline fail when one of its commands fails, instead of reporting only the last command by default.</li>
+</ul>
+<p>The switches work well together because many scripts pass values through variables and pipelines. Still, every one has boundaries. Reliable scripts make those boundaries visible rather than assuming the opening line handles all control flow.</p>
+<h3>What set -e Does</h3>
+<p>With <strong>-e</strong> enabled, Bash exits when a pipeline, list, or compound command returns a non-zero status, but the manual defines several exceptions. These exceptions are necessary because shell syntax uses command status as a Boolean value.</p>
+<p>A command used as the test after <strong>if</strong> is expected to return either success or failure. Bash must inspect that status to choose a branch, so <strong>-e</strong> does not exit merely because the condition is false. The same reasoning applies to the test command in <strong>while</strong> and <strong>until</strong>.</p>
+<p>Commands in <strong>&amp;&amp;</strong> and <strong>||</strong> lists are another important exception. In <strong>prepare &amp;&amp; deploy</strong>, failure of <strong>prepare</strong> controls whether <strong>deploy</strong> runs. In <strong>load_cache || rebuild_cache</strong>, failure of the first command selects the fallback. Bash therefore does not apply <strong>-e</strong> to commands in these lists except the command following the final <strong>&amp;&amp;</strong> or <strong>||</strong>. Commands in a pipeline other than the last are also excluded from the basic <strong>-e</strong> rule, and an inverted status with <strong>!</strong> is handled as control flow.</p>
+<p>This means “a command failed” is not equivalent to “the script exits.” Context matters. If a failure must always stop the operation, check it directly and return or exit with a clear message. Do not rearrange commands into an <strong>&amp;&amp;</strong> chain only to save lines.</p>
+<h3>What set -u Does</h3>
+<p>With <strong>-u</strong>, expanding an unset variable normally becomes an error. This catches misspelled names and missing inputs early. Without it, an unset variable often expands to an empty string, which can send a path, command argument, or configuration value in the wrong direction.</p>
+<p>Braces make the variable boundary explicit. Write <strong>${VAR}</strong> when text follows the value. For example, <strong>${name}_backup</strong> expands the parameter <strong>name</strong> and then adds the suffix. Writing <strong>$name_backup</strong> asks Bash for a different parameter named <strong>name_backup</strong>. Braces are not what enables <strong>-u</strong>; they prevent ambiguous or unintended parameter names and make reviews safer.</p>
+<p>Sometimes a missing value has a legitimate default. Bash parameter expansion provides <strong>${VAR:-default}</strong>. The colon form uses the default when <strong>VAR</strong> is unset or set to an empty value. By contrast, <strong>${VAR-default}</strong> uses the default only when the parameter is unset. That distinction matters when an empty string is a deliberate value.</p>
+<p>A default should express policy, not silence every error. A display label may have a harmless fallback. A destination directory, credential name, or environment selector may need an explicit requirement instead. Bash also provides the error form <strong>${VAR:?message}</strong>, which is useful when continuing without the value would be unsafe.</p>
+<h3>What pipefail Does</h3>
+<p>By default, the exit status of a pipeline is the status of its last command. If <strong>generate_report</strong> fails but its output is piped to a formatter that exits successfully, the pipeline can report success. That can hide the command that produced incomplete or empty input.</p>
+<p>With <strong>pipefail</strong> enabled, the pipeline status is the value of the rightmost command that exited non-zero, or zero if every command succeeded. It does not make the commands run one at a time, and it does not identify the failure in prose. It changes the final status that the surrounding shell logic receives.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-28-con-13-bash-strict-mode/en-diagram-2.png" alt="Comparison of pipeline exit status with pipefail disabled and enabled"></figure>
+<p><em>Without pipefail, the last command decides; with pipefail, a non-zero status can survive the pipeline.</em></p>
+<p>When <strong>-e</strong> and <strong>pipefail</strong> are both active, an unhandled failing pipeline can stop the script. The same <strong>-e</strong> syntax exceptions still apply. A pipeline used as an <strong>if</strong> condition, for example, is being tested deliberately and does not automatically terminate the script.</p>
+<h3>Demo</h3>
+<p>A practical script can enable the options near the top and then make expected failures explicit.</p>
+<blockquote><p>Enable set -euo pipefail. Read the output directory with ${OUTPUT_DIR:?OUTPUT_DIR is required}. Read an optional format with ${FORMAT:-text}. Run the producer and formatter as one pipeline. Put a recoverable probe inside an if statement, and handle its false branch deliberately.</p></blockquote>
+<p>This structure separates three cases. Required configuration fails with a useful message. Optional configuration gets a documented default. A probe whose non-zero status is expected becomes visible control flow. The main pipeline benefits from <strong>pipefail</strong>, so an earlier producer failure is not hidden by a successful final filter.</p>
+<p>For debugging a pipeline, capture status immediately. Bash exposes the statuses of the most recent foreground pipeline through the <strong>PIPESTATUS</strong> array. Any later command can replace that information, just as it replaces <strong>$?</strong>, so inspection must happen before other work.</p>
+<h3>Discussion</h3>
+<p><strong>What strict mode catches well</strong></p>
+<p>It is good at turning common mechanical mistakes into visible failures: an unchecked non-zero command in ordinary flow, an unset variable expansion, or a failed early stage hidden by the final pipeline command. These are valuable checks because the default shell behavior is often permissive.</p>
+<p><strong>What it does not catch</strong></p>
+<p>Strict mode cannot detect a command that returns zero with incorrect data. It cannot know that an empty result is suspicious. It does not validate the meaning of a path, confirm that a remote side effect happened, or prove that a file contains the expected records. Those checks must come from the script’s domain rules.</p>
+<p>It also does not remove the need to understand control contexts. <strong>if</strong>, <strong>while</strong>, <strong>until</strong>, <strong>&amp;&amp;</strong>, and <strong>||</strong> intentionally consume statuses. Functions, subshells, command substitutions, traps, and inherited shell options add more behavior that deserves focused testing when a script depends on it.</p>
+<p><strong>How to test it</strong></p>
+<p>Test each failure path, not only the successful run. Make a required variable unset and then empty. Fail the first and middle commands of a pipeline. Return non-zero inside an <strong>if</strong> condition and inside both sides of an <strong>&amp;&amp;</strong> or <strong>||</strong> list. Confirm the final exit status and any cleanup or message the caller receives.</p>
+<p>Run a syntax check with <strong>bash -n</strong>, and use a shell analysis tool for additional warnings, but keep behavioral tests. Syntax and linting cannot decide whether a successful command produced the right business result.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>Unset variables fail near the point of expansion.</li>
+<li>Pipeline failures are less likely to disappear behind a successful final command.</li>
+<li>Ordinary unhandled command failures stop more scripts early.</li>
+<li>The opening options communicate a stricter failure policy to readers.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li><strong>-e</strong> is context-sensitive and easy to describe too broadly.</li>
+<li>Valid empty or missing values need deliberate parameter expansion.</li>
+<li>Expected non-zero statuses must be expressed as control flow.</li>
+<li>Existing scripts may reveal assumptions and need careful migration.</li>
+<li>No option can replace validation of outputs and side effects.</li>
+</ul>
+<h3>Conclusion</h3>
+<p><strong>set -euo pipefail</strong> is useful because it changes permissive defaults in three different places. It can stop on many unhandled failures, reject unset expansions, and preserve a failure from an earlier pipeline stage. It is a strong starting point for a new Bash script.</p>
+<p>The safe takeaway is not “strict mode catches every error.” It is “strict mode makes several important errors harder to ignore.” Use braces to define variable names, use defaults only when they are truly valid, write expected failures as explicit branches, and test the contexts where <strong>-e</strong> does not exit. The script still needs checks for the result that actually matters.</p>
+<h3>Other</h3>
+<p>I want to keep a small failure matrix beside important scripts: unset input, empty input, failed producer, failed filter, false condition, and unsuccessful side effect. This makes the options testable behavior instead of a line copied from another script.</p>
+<h3>Reference</h3>
+<p><strong>GNU Bash Manual</strong></p>
+<p>Bourne Shell Builtins — set and its options: <a href="https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin">https://www.gnu.org/software/bash/manual/bash.html#The-Set-Builtin</a></p>
+<p>Pipelines — pipeline exit status and pipefail: <a href="https://www.gnu.org/software/bash/manual/bash.html#Pipelines">https://www.gnu.org/software/bash/manual/bash.html#Pipelines</a></p>
+<p>Shell Parameter Expansion — braces, defaults, and required values: <a href="https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion">https://www.gnu.org/software/bash/manual/bash.html#Shell-Parameter-Expansion</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
