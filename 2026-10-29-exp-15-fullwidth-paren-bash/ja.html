@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>全角かっこ一つで、必要な瞬間に Bash スクリプトが停止した</title></head>
+<body>
+<h1>全角かっこ一つで、必要な瞬間に Bash スクリプトが停止した</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/ja-cover.png" alt="全角かっこ一つで、必要な瞬間に Bash スクリプトが停止した"></figure>
+<p>この記事では、Bash 変数の直後に置いた句読点が、警告を出すべきときだけ定期実行スクリプトを壊した経緯を書きます。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul>
+<li>はじめに</li>
+<li>普段は動いていたスクリプト</li>
+<li>原因が分かりにくかった理由</li>
+<li>修正</li>
+<li>考察</li>
+<li>まとめ</li>
+<li>今後</li>
+<li>参考</li>
+</ul>
+<h3>はじめに</h3>
+<p>UTF-8 ロケールで動き、<strong>set -u</strong> を有効にした定期実行の shell script がありました。表示メッセージは中国語でした。通常の実行は問題なく終わるため、安定しているように見えていました。</p>
+<p>ところが、エラー分岐にある三つのメッセージは <strong>echo "今天（$DATE）…"</strong> のような形でした。全角かっこは自然な中国語の記号で、引用符の内側にもあります。それでも、その分岐が実行されると Bash は <strong>unbound variable</strong> を出して停止しました。</p>
+<p>問題は発生するタイミングです。これらの行は通常経路では通りません。10 月の二日だけ失敗し、まさに別の異常を説明する必要があるときに壊れました。そのうち一日は、想定していた入力がありませんでした。本来の警告を表示する代わりに、警告処理そのものが停止しました。</p>
+<h3>普段は動いていたスクリプト</h3>
+<p><strong>背景</strong></p>
+<p>未設定の変数を見逃さないため、私は <strong>set -u</strong> を使っていました。変数名の打ち間違いが空文字として処理されるより、その場で停止した方が安全です。スクリプトが <strong>DATE</strong> を必要としているのに処理を続ければ、ファイル名、検索条件、メッセージなどが誤ったものになる可能性があります。</p>
+<p>同じスクリプトは UTF-8 ロケールで動き、中国語の状態メッセージを表示していました。どちらも単独では珍しくありません。問題は、Bash の変数解析と、変数名の直後に置いた非 ASCII 文字との境界にありました。</p>
+<p>人が読むと、危険な行は明快です。<strong>$DATE</strong> の後ろに全角の閉じかっこがあるだけに見えます。しかし Bash は、私の想定どおりにはバイトを区切りませんでした。かっこの先頭バイトを変数参照の一部として読みました。<strong>set -u</strong> の下では、その名前は未設定なので shell が停止します。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/ja-diagram-1.png" alt="Bash 変数の隣の句読点が警告を停止させた流れ"></figure>
+<p><em>エラー分岐が中国語メッセージに入り、Bash が変数境界を誤って読み、警告処理が停止しました。</em></p>
+<h3>原因が分かりにくかった理由</h3>
+<p><strong>正常経路が問題の行を隠していました</strong></p>
+<p>影響を受けた行は三つあり、すべてエラー分岐の中でした。通常実行では一度も評価されません。何度正常終了しても、異常を説明するコードをテストしたことにはなりませんでした。</p>
+<p>運用スクリプトでは、この弱点が起こりやすいです。主処理は毎日動いていても、cleanup、warning、recovery の処理は使われないまま残ります。実際の障害が、そのコードにとって初めてのテストになることがあります。報告経路にも不具合があれば、元の異常が見えなくなります。</p>
+<p>今回、私が知りたかった条件は入力不足でした。しかし shell error は奇妙な変数名を示しました。役に立つはずの警告が、変数解析の謎に変わってしまいました。</p>
+<p><strong>見た目は正しい文章でした</strong></p>
+<p>変数名は正しく、引用符も閉じています。句読点も文章として自然です。ソースを目で読むと、かっこを単なる文字として扱いたくなります。</p>
+<p>手掛かりになったのは error message でした。Bash が後続バイトまで変数名だと判断していることを示していました。locale や表示の問題ではなく、変数の境界として考えると修正は小さく済みました。</p>
+<h3>修正</h3>
+<p><strong>境界では波かっこを使います</strong></p>
+<p>非 ASCII 文字に接する変数をすべて <strong>${DATE}</strong> に変更しました。修正後は <strong>echo "今天（${DATE}）…"</strong> の形です。波かっこが parameter name の終端を Bash に明示し、句読点は周囲の文字列として残ります。</p>
+<p>この書き方は、次の文字が ASCII でも明確です。たとえば <strong>${FILE}_backup</strong> の変数は <strong>FILE</strong> です。一方、<strong>$FILE_backup</strong> は <strong>FILE_backup</strong> という別の変数を参照します。波かっこなら推測が不要です。</p>
+<p>さらに、波かっこのない変数の直後に非 ASCII byte がある箇所を探しました。</p>
+<p><strong>LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' *.sh</strong></p>
+<p><strong>LC_ALL=C</strong> により、この検索は入力を byte 単位で扱います。正規表現は dollar sign、shell 形式の変数名、printable ASCII 外の文字という並びを探します。今回の境界問題を見つけるための限定的な check です。完全な shell parser ではないため、変更前に各 match を確認します。</p>
+<h3>考察</h3>
+<p><strong>set -u の利点</strong></p>
+<p>私は今後も <strong>set -u</strong> を使いたいです。曖昧な文字列展開を、見える failure に変えてくれました。これがなければ、誤った参照が空または不正な出力を作り、そのまま処理が続いた可能性があります。静かな誤動作より、停止した方が調査しやすいです。</p>
+<p>また、変数境界を明示する習慣にもつながります。code identifier と中国語、日本語などを同じ message に書く場合、保守がしやすくなります。</p>
+<p><strong>通常経路だけに頼る欠点</strong></p>
+<p>定期実行 job は、failure message を一度も実行せずに何度も成功できます。したがって、成功履歴だけでは、入力不足や command failure のときだけ動く分岐の健全性は分かりません。</p>
+<p>より良い test では、それらの分岐を意図的に実行します。この script なら、想定入力を省略し、別の shell error を出さずに警告が表示されることを確認できます。残り二つの error line も個別に通すべきです。これは次に追加したい提案であり、すでに実装した test ではありません。</p>
+<p><strong>code と文章は同じ境界を共有します</strong></p>
+<p>多言語の shell message には二つの文法があります。人は文章として読みますが、Bash は先に parameter expansion の規則を適用します。引用符は空白や多くの特殊文字を保護しますが、波かっこのない parameter name の終端を常に意図どおり伝えるわけではありません。波かっこなら境界が明確です。</p>
+<h3>まとめ</h3>
+<p>中国語の文字列が Bash で危険だったわけではありません。波かっこのない変数が全角文字に接し、Bash と私が境界を違って読んだことが原因です。そこで <strong>set -u</strong> が script を停止させました。</p>
+<p>修正は <strong>${DATE}</strong> と書き、似た境界を scan し、failure 時だけ動く code に注意を向けることでした。私が得た教訓は単純です。error message も実行される code です。必要になる日より前に、実際に test する必要があります。</p>
+<h3>今後</h3>
+<p>すべての warning branch に入る case を追加し、見える message を検証したいです。byte 単位の scan も軽量な review check として残したいですが、候補しか見つけられないことは忘れません。shell を理解する linter や直接の branch test の方が、強い証拠になります。</p>
+<p>また、warning code 自体が失敗しても元の原因を保持する通知方法を検討したいです。missing input や失敗した command が見え続ける設計です。これは今回の修正には含まれず、次に評価したい改善案です。</p>
+<h3>参考</h3>
+<p><strong>GNU Bash</strong></p>
+<p>Bash Reference Manual: <a href="https://www.gnu.org/software/bash/manual/bash.html">https://www.gnu.org/software/bash/manual/bash.html</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

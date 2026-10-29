@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>一個全形括號，讓我的 Bash 程式在最需要時當場中止</title></head>
+<body>
+<h1>一個全形括號，讓我的 Bash 程式在最需要時當場中止</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/zh-cover.png" alt="一個全形括號，讓我的 Bash 程式在最需要時當場中止"></figure>
+<p>這篇文章要記錄一個很小卻難找的錯誤：Bash 變數旁的標點，讓排程程式只在需要印出警告時中止。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul>
+<li>前言</li>
+<li>平常都能執行的程式</li>
+<li>為什麼問題難找</li>
+<li>修正方式</li>
+<li>討論</li>
+<li>結論</li>
+<li>其他</li>
+<li>參考</li>
+</ul>
+<h3>前言</h3>
+<p>我有一支定期執行的 shell script。它在 UTF-8 locale 下運作，開啟了 <strong>set -u</strong>，並以中文印出狀態訊息。大部分執行都能正常結束，所以它看起來很穩定。</p>
+<p>但是，錯誤分支裡有三行訊息寫成類似 <strong>echo "今天（$DATE）…"</strong> 的形式。全形括號是很自然的中文標點，而且整段文字也放在引號內。當其中一個分支真的被執行時，Bash 卻回報 <strong>unbound variable</strong>，然後中止。</p>
+<p>最麻煩的是發生時機。這三行都不在正常路徑上。程式平時不會執行它們，卻在十月的兩天失敗，而且剛好都是它應該解釋另一個問題的時候。其中一天缺少預期的輸入。程式沒有印出這個警告，反而在警告流程裡再次出錯。</p>
+<h3>平常都能執行的程式</h3>
+<p><strong>背景</strong></p>
+<p>我使用 <strong>set -u</strong>，是為了讓未設定的變數直接使程式停止。變數名稱打錯時，不應該悄悄變成空字串。如果程式需要 <strong>DATE</strong>，卻在沒有它的情況下繼續執行，可能會產生錯誤的檔名、查詢條件或通知內容。</p>
+<p>同一支程式在 UTF-8 locale 下執行，狀態文字使用中文。這兩件事本身都很普通。真正的問題出現在 Bash 解析變數的規則，以及緊接在變數名稱後面的非 ASCII 字元之間。</p>
+<p>對人來說，出問題的那一行很好讀。我看到的是 <strong>$DATE</strong>，後面接一個全形右括號。Bash 卻沒有依照我的預期切開這些 byte。它把全形括號的第一個 byte 當成變數參照的一部分。在 <strong>set -u</strong> 開啟時，這個被誤讀的名稱沒有設定，因此 shell 立刻停止。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/zh-diagram-1.png" alt="Bash 變數旁的標點如何讓警告流程中止"></figure>
+<p><em>錯誤分支進入中文訊息後，Bash 誤讀變數邊界，最後讓警告流程本身中止。</em></p>
+<h3>為什麼問題難找</h3>
+<p><strong>正常路徑藏住了問題</strong></p>
+<p>總共有三行受到影響，而且全部位於錯誤分支。正常執行時根本不會跑到它們。連續成功很多次，只能證明主要路徑可用，不能證明負責說明錯誤的程式碼也能運作。</p>
+<p>這是維運程式常見的弱點。主要命令可能每天都在執行，但清理、警告與復原流程長期沒有被碰到。真正發生異常時，才成為那些分支的第一次測試。如果回報流程也有 bug，它就會蓋掉原本啟動這個流程的問題。</p>
+<p>這次真正需要理解的是輸入缺失。shell error 卻把注意力帶到一個奇怪的變數名稱。原本應該有用的警告，變成了變數解析的謎題。</p>
+<p><strong>文字看起來完全正確</strong></p>
+<p>那一行不像打字錯誤。變數名稱正確，引號也成對，標點放在中文句子裡很自然。直接看原始碼時，我會把括號當成一般文字。</p>
+<p>真正的線索是錯誤訊息。它顯示 Bash 認為變數名稱延伸到了後面的 byte。當我不再把它當成 locale 或顯示問題，而是視為變數邊界問題，修正方式就很小。</p>
+<h3>修正方式</h3>
+<p><strong>在邊界使用大括號</strong></p>
+<p>我把所有緊鄰非 ASCII 文字的變數改成 <strong>${DATE}</strong>。修正後的形式是 <strong>echo "今天（${DATE}）…"</strong>。大括號明確告訴 Bash parameter name 在哪裡結束，標點則繼續屬於外面的字串。</p>
+<p>即使後面接的是 ASCII 字元，這種寫法也更清楚。例如，<strong>${FILE}_backup</strong> 表示變數是 <strong>FILE</strong>；<strong>$FILE_backup</strong> 則是要求 Bash 讀取另一個名為 <strong>FILE_backup</strong> 的變數。大括號消除了猜測空間。</p>
+<p>我也用以下指令掃描 shell scripts，尋找沒有大括號、後面又緊接非 ASCII byte 的變數：</p>
+<p><strong>LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' *.sh</strong></p>
+<p><strong>LC_ALL=C</strong> 讓掃描以 byte 為單位處理輸入。這個規則會尋找 dollar sign、shell 形式的變數名稱，以及一個不在可列印 ASCII 範圍內的字元。它是針對這種邊界問題的檢查，不是完整的 shell parser，所以我仍會逐一審查每個 match，再決定是否修改。</p>
+<h3>討論</h3>
+<p><strong>set -u 的好處</strong></p>
+<p>我仍然想保留 <strong>set -u</strong>。它把模糊的字串展開變成了明確的失敗。如果沒有它，錯誤參照可能產生空白或不正確的輸出，程式卻繼續執行。明確中止通常比安靜地說謊更容易調查。</p>
+<p>它也促使我明確標示變數邊界。當訊息混合 code identifier、中文、日文或其他文字時，後續維護會比較安全。</p>
+<p><strong>只依賴正常路徑的缺點</strong></p>
+<p>排程工作可以成功執行很多次，卻從未碰過 failure message。因此，成功紀錄無法說明那些只在輸入缺失或命令失敗時才會執行的分支是否健康。</p>
+<p>更好的測試應該主動進入這些分支。以這支程式來說，可以刻意拿掉預期輸入，確認警告能出現，而且不會再發生第二個 shell error。另外兩行錯誤訊息也應各自覆蓋。這些是我下一輪想做的建議，並不是已經完成的測試。</p>
+<p><strong>程式碼與文字共用一條邊界</strong></p>
+<p>本地化的 shell message 同時包含兩種語法。讀者看到的是句子，Bash 先看到的卻是 parameter expansion 規則。引號能保護空白與許多特殊字元，但不一定能表達沒有大括號的 parameter name 應該在哪裡結束。大括號可以把這條邊界寫清楚。</p>
+<p>現在只要變數緊貼其他文字，我就會把它當成一個小型 review signal。特別是在非 ASCII 標點旁，通常最安全的形式是 <strong>${NAME}</strong>。只多兩個字元，卻能省下罕見分支終於執行時的除錯時間。</p>
+<h3>結論</h3>
+<p>這次失敗不是因為中文放進 Bash 就不安全。真正原因是沒有大括號的變數緊貼全形字元，Bash 對邊界的理解和我不同，接著 <strong>set -u</strong> 讓程式停止。</p>
+<p>修正方式是寫成 <strong>${DATE}</strong>、掃描類似的邊界，並特別檢查只在失敗時執行的程式碼。對我來說，最直接的教訓是：錯誤訊息也是會被執行的程式碼。必須在真正依賴它之前，用測試走過一次。</p>
+<h3>其他</h3>
+<p>我想加入能進入每個警告分支的測試案例，並驗證使用者實際看見的訊息。我也想保留 byte 導向的掃描，作為輕量的 code review 檢查，但要記得它只能找候選項目。理解 shell 語法的 linter 或直接的 branch test，能提供更強的證據。</p>
+<p>我也想評估如何在警告程式本身失敗時保留原始原因。即使第二層回報出錯，缺少的輸入或失敗的命令仍應可見。這項設計不在目前完成的修正內，而是我接下來想評估的可靠性改善。</p>
+<h3>參考</h3>
+<p><strong>GNU Bash</strong></p>
+<p>Bash Reference Manual: <a href="https://www.gnu.org/software/bash/manual/bash.html">https://www.gnu.org/software/bash/manual/bash.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

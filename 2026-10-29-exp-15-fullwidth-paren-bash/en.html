@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>One Full-Width Parenthesis Made My Bash Script Crash Exactly When It Mattered</title></head>
+<body>
+<h1>One Full-Width Parenthesis Made My Bash Script Crash Exactly When It Mattered</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/en-cover.png" alt="One Full-Width Parenthesis Made My Bash Script Crash Exactly When It Mattered"></figure>
+<p>In this blog, I will describe how punctuation next to a Bash variable broke a scheduled script only when its warning path finally ran.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>The script that usually worked</li>
+<li>Why the failure was confusing</li>
+<li>The fix</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>I had a scheduled shell script that ran with <strong>set -u</strong> in a UTF-8 locale. Its messages were written in Chinese. Most runs completed normally, so the script looked stable.</p>
+<p>Three messages in its error branches used a line shaped like this: <strong>echo "今天（$DATE）…"</strong>. The full-width parenthesis looked harmless. It was normal Chinese punctuation, and it was inside a quoted string. Yet when one of those branches ran, Bash stopped with an <strong>unbound variable</strong> error.</p>
+<p>The awkward part was the timing. Those lines were not on the normal path. The script failed on two days in October, exactly when it needed to explain that something else was wrong. On one of those days, the expected input was missing. Instead of printing that warning, the warning itself crashed.</p>
+<h3>The script that usually worked</h3>
+<p><strong>Background</strong></p>
+<p>I used <strong>set -u</strong> so that an unset variable would stop the script. This is useful because a typo in a variable name should not quietly become an empty string. If a script expects <strong>DATE</strong>, continuing without it can produce a misleading file name, query, or message.</p>
+<p>The script also ran in a UTF-8 locale and printed Chinese status text. Neither choice was unusual by itself. The problem appeared at the boundary between Bash variable parsing and a non-ASCII character placed immediately after the variable name.</p>
+<p>The risky line was easy to read as a human. I saw <strong>$DATE</strong>, followed by a closing full-width parenthesis. Bash did not separate those bytes in the way I expected. It read the first byte of that parenthesis as part of the variable reference. Under <strong>set -u</strong>, the resulting name was unset, so the shell stopped.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-29-exp-15-fullwidth-paren-bash/en-diagram-1.png" alt="How punctuation beside a Bash variable turned a warning into a crash"></figure>
+<p><em>The error branch reached a Chinese message, Bash misread the variable boundary, and the warning path crashed.</em></p>
+<h3>Why the failure was confusing</h3>
+<p><strong>The happy path hid the bad lines</strong></p>
+<p>There were three affected lines, and every one of them was in an error branch. A normal run never evaluated them. That meant repeated successful runs did not test the code that explained failures.</p>
+<p>This is a common weakness in operational scripts. The main command may work every day, while cleanup, warning, or recovery code remains untouched. The first real test of that code arrives during an incident. If the reporting path has its own bug, the script can hide the event that activated it.</p>
+<p>That is what happened here. The missing input was the condition I needed to understand. The shell error pointed at a strange variable name instead. It turned a useful warning into a parser puzzle.</p>
+<p><strong>The text looked correct</strong></p>
+<p>The line did not look like a typo. The punctuation was valid for the sentence, the quote marks were balanced, and the variable name itself was correct. Reading the source visually encouraged me to treat the parenthesis as ordinary text.</p>
+<p>The error message was the better clue. It showed that Bash believed the variable name continued into the following bytes. Once I treated this as a variable-boundary problem instead of a locale or display problem, the fix became small.</p>
+<h3>The fix</h3>
+<p><strong>Use braces at the boundary</strong></p>
+<p>I changed the variable to <strong>${DATE}</strong> wherever it touched non-ASCII text. The repaired line has the shape <strong>echo "今天（${DATE}）…"</strong>. Braces tell Bash exactly where the parameter name ends. The punctuation then remains part of the surrounding string.</p>
+<p>This is clearer even when the next character is ASCII. For example, <strong>${FILE}_backup</strong> says that the variable is <strong>FILE</strong>, while <strong>$FILE_backup</strong> asks Bash for a different variable named <strong>FILE_backup</strong>. Braces remove the guess.</p>
+<p>I also scanned shell scripts for an unbraced variable followed by a non-ASCII byte:</p>
+<p><strong>LC_ALL=C grep -nE '\$[A-Za-z_][A-Za-z0-9_]*[^ -~]' *.sh</strong></p>
+<p>With <strong>LC_ALL=C</strong>, the scan treats the input byte by byte. The expression looks for a dollar sign, a shell-style variable name, and then a character outside printable ASCII. It is a focused check for this boundary pattern. It is not a full shell parser, so I still review every match before changing it.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits of set -u</strong></p>
+<p>I still want <strong>set -u</strong>. It turned an ambiguous string expansion into a visible failure. Without it, a malformed reference could produce empty or incorrect output and let the script continue. A hard failure is easier to investigate than a quiet lie.</p>
+<p>The setting also pushes me toward explicit variable boundaries. That makes maintenance safer when messages mix code identifiers with Chinese, Japanese, or other text.</p>
+<p><strong>Drawbacks of relying on the normal path</strong></p>
+<p>A scheduled job can run successfully many times without exercising its failure messages. Success history therefore tells me little about branches that only run when an input is absent or a command fails.</p>
+<p>A better test should invoke those branches on purpose. For this script, one useful case would omit the expected input and verify that the warning appears without a second shell error. Another would cover each of the other two error lines. These are recommendations for the next test pass, not tests I had already added.</p>
+<p><strong>Code and prose share a boundary</strong></p>
+<p>Localized shell messages mix two grammars. The reader sees a sentence. Bash first sees parameter expansion rules. Quoting protects spaces and many special characters, but it does not always communicate the intended end of an unbraced parameter name. Braces make that boundary explicit.</p>
+<p>I now treat a variable that touches surrounding text as a small review signal. The safest form is usually <strong>${NAME}</strong>, especially beside non-ASCII punctuation. It costs two characters and saves time when an unusual branch finally runs.</p>
+<h3>Conclusion</h3>
+<p>The script did not fail because Chinese text is unsafe in Bash. It failed because an unbraced variable touched a full-width character and Bash read the boundary differently from me. <strong>set -u</strong> then stopped the script.</p>
+<p>The fix was to write <strong>${DATE}</strong>, scan for similar boundaries, and pay attention to code that only runs during failures. The broader lesson for me is simple: an error message is executable code too. It needs a real test before the day I depend on it.</p>
+<h3>Other</h3>
+<p>I want to add cases that enter every warning branch and assert the visible message. I also want to keep the byte-oriented scan as a lightweight review check, while remembering that it can only find candidates. A shell-aware linter or a direct branch test would provide stronger evidence.</p>
+<p>I also want failure notifications to preserve the original cause. If warning code fails, the report should still make the missing input or failed command visible. That design is not in the current fix, but it is the next reliability improvement I would evaluate.</p>
+<h3>Reference</h3>
+<p><strong>GNU Bash</strong></p>
+<p>Bash Reference Manual: <a href="https://www.gnu.org/software/bash/manual/bash.html">https://www.gnu.org/software/bash/manual/bash.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
