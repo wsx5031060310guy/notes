@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Alerts People Still Read: Severity, Cause, and Auto-Resolve</title></head><body>
+<h1>Alerts People Still Read: Severity, Cause, and Auto-Resolve</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-30-con-14-alert-design/en-cover.png" alt="Alerts People Still Read: Severity, Cause, and Auto-Resolve"></figure>
+<p>In this blog, I will explain how I want to design alerts that earn attention instead of training people to ignore them.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Introduction</li><li>Overview</li><li>What deserves an alert</li><li>Write the cause and next step</li><li>Auto-resolve and retire alerts</li><li>Discussion</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Introduction</h3>
+<p>An alert asks a person to stop what they are doing. That interruption has a cost. If the message does not require a human decision or action, it probably belongs somewhere else.</p>
+<p>I have seen monitoring systems begin with a reasonable rule and then collect more rules over time. A job reports a warning every morning. A temporary check stays after the migration ends. An old service is removed, but its alert remains. Each message looks harmless on its own. Together, they teach the receiver that alerts are routine background noise.</p>
+<p>Google's Site Reliability Engineering guidance draws a useful line. Pages should represent an ongoing or imminent problem that needs a human. Subcritical findings can go to a dashboard or report. This distinction is simple, but it changes both the alert rule and the text a person receives.</p>
+<h3>Overview</h3>
+<p>I use three questions when reviewing an alert:</p>
+<ol><li>Does this condition need a human now?</li><li>Does the message explain the likely cause and the next useful action?</li><li>Will the alert resolve or disappear when the condition is no longer relevant?</li></ol>
+<p>The first question controls severity. The second reduces diagnosis time. The third prevents stale incidents from remaining visible after the system recovers.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-30-con-14-alert-design/en-diagram-1.png" alt="A proposed path from a monitoring signal to a page or report"></figure>
+<p><em>Proposed design: page only when a human must act; route other findings to a report.</em></p>
+<h3>What deserves an alert</h3>
+<p><strong>Separate a page from information</strong></p>
+<p>A monitoring system can collect many useful signals without turning each one into an interruption. Latency, traffic, errors, and saturation are common service signals. They help describe health, but a metric crossing a line is not automatically a reason to page someone.</p>
+<p>I want a paging rule to describe user impact, a serious risk of impact, or a condition that automation cannot safely handle. A low-priority observation can appear in a daily report. A trend can appear on a dashboard. A diagnostic detail can stay in logs. These destinations preserve the information without demanding an immediate response.</p>
+<p>Severity should also imply an expected response. A critical alert means a person should act now. A warning may require review during working time. An informational item has no immediate action. If every finding uses the highest severity, severity stops carrying meaning.</p>
+<p><strong>Alert on symptoms, attach causes</strong></p>
+<p>The SRE book distinguishes symptoms from causes. A symptom tells us what is broken for the user. A cause tells us why it may be broken. For paging, symptoms are often stronger signals because they reflect an actual service problem. Internal causes are still useful, but they should support diagnosis rather than create ten separate pages for one incident.</p>
+<p>For example, a service may have slow responses while one dependency is saturated. Paging on the user-visible slowdown gives the responder a clear reason to act. The alert can attach the dependency signal as a likely cause. This is easier to understand than receiving independent messages for every layer.</p>
+<h3>Write the cause and next step</h3>
+<p>An alert title such as "job failed" says almost nothing. It does not identify the affected function, explain why the rule fired, or tell the responder where to begin. The person must open several tools before they can even classify the problem.</p>
+<p>I prefer alert text with four pieces of information:</p>
+<ul><li>What is affected and how severe the impact is.</li><li>What condition triggered the alert.</li><li>The most useful known cause or diagnostic clue.</li><li>The next safe action or a link to the relevant runbook.</li></ul>
+<p>The cause must not pretend to be certain when the monitoring rule only has a clue. "Database connection failures increased" is a measured condition. "The database caused the outage" is a conclusion that may be wrong. Clear wording lets a responder trust the message without trusting it blindly.</p>
+<p>The next step should be specific enough to reduce searching. It might say to inspect a named metric, compare a recent deployment, or follow a recovery procedure. It should not tell a person to perform a destructive action automatically. High-risk recovery still needs judgment and safeguards.</p>
+<h3>Auto-resolve and retire alerts</h3>
+<p><strong>Close the loop after recovery</strong></p>
+<p>An alert should not remain open after its condition clears. Automatic resolution tells the receiver that the system recovered and keeps the incident list accurate. It also provides a useful duration: when the problem began and when the signal returned to normal.</p>
+<p>Auto-resolution does not erase the event. The history should remain available for review. The difference is that a recovered condition is no longer presented as active work.</p>
+<p>Some rules need a stable recovery window so they do not open and close repeatedly around a threshold. The exact window depends on the service and signal. I would choose it from observed behavior, then test both the firing and recovery paths.</p>
+<p><strong>Delete alerts with their producers</strong></p>
+<p>Monitoring configuration has a lifecycle. When a scheduled job, endpoint, or service is retired, its alerts should be reviewed in the same change. Otherwise, an obsolete rule may continue to query missing data, send confusing messages, or remain permanently silent.</p>
+<p>I want the retirement checklist to include the alert rule, dashboard panel, runbook, and notification route. The goal is not to preserve every old check. It is to keep the remaining system understandable.</p>
+<h3>Discussion</h3>
+<p><strong>Why daily alerts stop working</strong></p>
+<p>A message that fires every day without prompting action is not functioning as an alert. It becomes a habit. People learn its shape, dismiss it quickly, and eventually apply the same reflex to nearby messages that may matter.</p>
+<p>This is alert fatigue in practical terms. The problem is not only volume. Repeated low-value interruptions weaken the meaning of the channel. A quiet channel with a clear contract is more useful than a busy channel full of technically correct observations.</p>
+<p><strong>Benefits</strong></p>
+<ul><li>Responders can decide faster because the message carries context.</li><li>Reports retain useful information without interrupting people.</li><li>Automatic resolution keeps active incident state honest.</li><li>Retirement work prevents obsolete rules from adding noise.</li></ul>
+<p><strong>Drawbacks</strong></p>
+<p>This design requires maintenance. Teams must agree on severity, write runbooks, test recovery behavior, and revisit rules as a service changes. A symptom-based page may also need supporting metrics before the likely cause is visible.</p>
+<p>There is no perfect alert rule. Precision, recall, detection time, and reset time pull in different directions. The SRE Workbook recommends evaluating these trade-offs in relation to significant events and error budget consumption. I would rather make those trade-offs explicit than hide them behind a large collection of thresholds.</p>
+<h3>Conclusion</h3>
+<p>An alert should be a request for human attention, not a storage place for every monitoring result. I want pages to represent conditions that need action. I want the message to state the impact, trigger, useful cause, and next step. When the condition clears, the alert should resolve. When the producer is retired, the alert should leave with it.</p>
+<p>The standard is not "did the rule fire?" The standard is "did the message help the right person take the right action?" If a daily message does not change what anyone does, I should move it to a report, automate the response, or remove it.</p>
+<h3>Other</h3>
+<p>I want to audit a small set of scheduled-job alerts next. I will classify each message by required response, check whether it includes the first useful diagnostic clue, and test whether recovery closes it. I also want to add alert retirement to the same checklist used to remove a job or service.</p>
+<h3>Reference</h3>
+<p><strong>Google Site Reliability Engineering</strong></p>
+<p>Monitoring Distributed Systems: <a href="https://sre.google/sre-book/monitoring-distributed-systems/">https://sre.google/sre-book/monitoring-distributed-systems/</a></p>
+<p><strong>Google SRE Workbook</strong></p>
+<p>Alerting on SLOs: <a href="https://sre.google/workbook/alerting-on-slos/">https://sre.google/workbook/alerting-on-slos/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
