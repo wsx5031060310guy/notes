@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>My Daily Status Digest Was Full of Warnings Nobody Could Act On</title></head><body>
+<h1>My Daily Status Digest Was Full of Warnings Nobody Could Act On</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-31-exp-16-digest-warning-fatigue/en-cover.png" alt="My Daily Status Digest Was Full of Warnings Nobody Could Act On"></figure>
+<p>My morning status digest looked useful, but most of its visible warnings gave me nothing useful to do.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul><li>Background</li><li>Overview</li><li>Demo: what filled the digest</li><li>Fixing stale alerts</li><li>Changing warning into information</li><li>Discussion</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Background</h3>
+<p>I run a small job scheduler on my home server. Once each morning, it sends one digest. The digest has a section called "needs attention," and that section can list up to 8 active alerts.</p>
+<p>The limit was intentional. I did not want a long wall of status text every morning. Eight visible items should have been enough to show me the work that mattered. Instead, the limit made bad alert state more expensive. A stale or low-value warning did not merely add one more line. It occupied a slot that another active alert could have used.</p>
+<p>The scheduler also had a simple rule for resolving an alert: the same job had to succeed on a later run. That rule works while a job continues to run. A failed job creates an alert, a successful run clears it, and the digest reflects the current state. The rule breaks when a job is disabled. A disabled job has no next successful run, so its open alert has no way to resolve.</p>
+<h3>Overview</h3>
+<p>I found two different kinds of noise in the same digest.</p>
+<ol><li>Alerts from disabled jobs remained active even though those jobs would never run again.</li><li>Two checks reported Warning every day for conditions that were useful to record but did not always require action.</li></ol>
+<p>Both appeared under the same "needs attention" heading. From the reader's point of view, they looked equally important. They were not.</p>
+<p>The fix now separates lifecycle from severity. The digest skips alerts that belong to disabled jobs. The two noisy keyword checks still run and still appear in the report, but they report INFO instead of Warning. They no longer turn the check yellow.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-10-31-exp-16-digest-warning-fatigue/en-diagram-1.png" alt="Implemented routing for disabled jobs, actionable warnings, and informational findings"></figure>
+<p><em>The implemented flow removes alerts from disabled jobs and routes non-actionable findings to INFO while keeping them in the morning report.</em></p>
+<h3>Demo: what filled the digest</h3>
+<p>I disabled 359 unused jobs. Those jobs still had 764 open alerts. Because an alert resolved only when its job next succeeded, none of the 764 alerts could resolve after the jobs were disabled.</p>
+<p>The daily digest showed the practical effect. Five of its 8 available slots displayed jobs that no longer ran. More than half of the small attention window was occupied by states that could not change and actions I could not take. The digest was technically reporting active alert records, but it was not reporting active work.</p>
+<p>This distinction matters. The alert record existed. Its producer did not. Looking at the alert could not help the job succeed because the job had been intentionally disabled. The only useful response was to change how the digest treated alerts whose jobs were no longer enabled.</p>
+<p>The volume also hid the lifecycle mistake. Seeing 764 open alerts might suggest 764 current failures. The actual issue was that the resolution rule depended on a future event that had become impossible. The state model assumed every alerted job would run again.</p>
+<h3>Fixing stale alerts</h3>
+<p>I changed the digest so it skips alerts from disabled jobs. This is a presentation rule applied to the morning digest: disabled producers no longer consume its limited "needs attention" slots.</p>
+<p>I chose that boundary because the digest is supposed to tell me where attention can change an outcome. An alert attached to a disabled job fails that test. Its historical record may still describe something that happened, but it should not compete with alerts from jobs that are still active.</p>
+<p>This was different from forcing those jobs to run once more or pretending that they succeeded. Neither would describe what happened. The jobs were unused and disabled. The digest needed to understand that lifecycle state instead of waiting forever for success.</p>
+<p>After the change, the 5 occupied slots were no longer filled by jobs that did not run. I am not claiming that filtering disabled jobs solves every stale-alert case. It solves the case I observed: an open alert whose only resolution path was a later success from a job that had been disabled.</p>
+<h3>Changing warning into information</h3>
+<p>The second source of fatigue came from two checks that produced a warning every day for two weeks.</p>
+<p>One check found 11 repositories with no commits in 14 days. Those repositories were parked on purpose. The observation was accurate, but the warning implied that someone needed to correct the inactivity. In this case, inactivity was expected. I still wanted the report to preserve the observation, but I did not want it to make the check yellow.</p>
+<p>The other check looked for the words "done" or "deployed" without nearby evidence. It also matched index pages and notes. The rule was broad enough to find wording that deserved review, but a match did not prove that the page had a problem.</p>
+<p>I changed both checks to report INFO. They remain visible in the report, so the information was not thrown away. Their severity now matches the action they request: review when useful, rather than treat every match as a warning.</p>
+<p>After this change, one check went from 13 warnings to 0, and the other went from 31 to 0. The reduction did not mean every old warning was false. Twenty of the 31 findings were real problems: notes were missing <em>last_updated</em>. I fixed those notes.</p>
+<p>That result was the most useful part of the cleanup. A noisy rule can contain genuine findings. Simply deleting the rule would have hidden them. Changing the severity let the check remain in the report while I corrected the real note problems and stopped presenting every broad match as an urgent state.</p>
+<h3>Discussion</h3>
+<p><strong>Accuracy is not the same as actionability</strong></p>
+<p>All three noisy states could be described as accurate. The alert records were open. The 11 repositories had no commits in 14 days. The keyword check really found "done" or "deployed" without nearby evidence. Accuracy alone did not tell me whether a finding belonged under "needs attention."</p>
+<p>An attention section needs a stronger contract. A visible item should point to an action that can change the condition. Disabled jobs violated that contract because they could never produce the success required for resolution. Parked repositories violated it because their inactivity was intentional. Broad keyword matches needed inspection, not an automatic yellow state.</p>
+<p><strong>A small digest amplifies ranking mistakes</strong></p>
+<p>A cap of 8 makes the report readable, but it also turns every slot into a ranking decision. When 5 slots show dead producers, only 3 remain for everything else. The digest can be short and still be exhausting because the reader must repeatedly discard items before finding something actionable.</p>
+<p>The implemented changes address the two failure modes I saw. Disabled-job alerts are skipped. Informational checks stay visible without becoming warnings. For future checks, I plan to ask two questions before assigning Warning: can a person act on this now, and can the system recognize when that action is complete?</p>
+<p><strong>Severity should not replace cleanup</strong></p>
+<p>Moving a check to INFO is not permission to ignore real defects. The 20 notes missing <em>last_updated</em> were still problems, and I fixed them. Severity controls how a finding competes for attention; it does not decide whether the underlying data is correct.</p>
+<p>Google's SRE discussion of monitoring provides useful general background on the difference between urgent human notifications and information that can remain in a report. My case is much smaller than a production paging system, but the attention problem is similar: a channel loses value when it repeatedly asks for action where none is available.</p>
+<h3>Conclusion</h3>
+<p>My digest did not have a formatting problem. It had a state and severity problem. Alerts from disabled jobs could never resolve, yet they occupied 5 of 8 attention slots. Two daily checks used Warning for observations that belonged in the report but did not always require correction.</p>
+<p>The digest now skips alerts from disabled jobs. The two checks now report INFO, remain in the report, and no longer turn their checks yellow. One warning count fell from 13 to 0 and the other from 31 to 0. I also fixed the 20 real note problems found among those 31 results.</p>
+<p>The lesson I am keeping is plain: an alert can be true and still be useless as a request for attention. The digest should show work I can do, not records that can only wait forever.</p>
+<h3>Other</h3>
+<p>I plan to review other daily checks with the same distinction. Findings that describe useful context can remain in the report as INFO. Warning should be reserved for a condition with a clear response and a reachable resolution path. I also plan to check job lifecycle when reviewing any future alert that remains open longer than expected.</p>
+<h3>Reference</h3>
+<p><strong>Google Site Reliability Engineering</strong></p>
+<p>Monitoring Distributed Systems: <a href="https://sre.google/sre-book/monitoring-distributed-systems/">https://sre.google/sre-book/monitoring-distributed-systems/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
