@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>macOS のバックグラウンドジョブ：launchd とプライバシー権限</title></head>
+<body>
+<h1>macOS のバックグラウンドジョブ：launchd とプライバシー権限</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/ja-cover.png" alt="macOS のバックグラウンドジョブ：launchd とプライバシー権限"></figure>
+<p>Terminal では動くコマンドでも、スケジュールとファイルアクセスが別の仕組みであるため、launchd では失敗することがあります。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>はじめに</li><li>概要</li><li>Launch Agent の定義</li><li>プライバシー権限の影響</li><li>デモ：より安全な設計</li><li>利点と欠点</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>はじめに</h3>
+<p>この記事では、macOS のバックグラウンド処理をどう考えるべきか説明します。スケジューラは launchd です。アクセス制御は macOS のプライバシー機構が担当します。安定したジョブには両方の条件が必要です。</p>
+<p>対話シェルとバックグラウンドプロセスは、同じ実行環境ではありません。Terminal アプリには、すでに特定フォルダを読む権限があるかもしれません。しかし、launchd が起動したツールに同じ権限があるとは限りません。コマンドが正しく、予定どおり起動しても、入力を読めないことがあります。</p>
+<p>そのため、「launchd はジョブを開始したか」だけでは不十分です。「どの実行ファイルがファイルを開こうとし、その実行ファイルに許可があったか」も確認します。</p>
+<h3>概要</h3>
+<p>Apple は、ユーザー単位のバックグラウンドプロセスを開始する方法として launchd を案内しています。このプロセスは user agent と呼ばれ、ログイン中のユーザーに属し、そのユーザーがログインしている間に動作します。システムレベルの daemon は配置場所と対象範囲が異なります。</p>
+<p>launchd のジョブは property list、一般には plist で定義します。設定には一意な Label と ProgramArguments を記述します。また、実行時刻、標準出力、標準エラーの保存先も指定できます。</p>
+<p>カレンダーに基づく実行には StartCalendarInterval を使えます。ただし、スケジュールは設計の一部にすぎません。絶対パス、予測可能な作業データ、確認できるログ、必要なファイルへの権限も必要です。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/ja-diagram-1.png" alt="launchd のスケジュールと macOS のフォルダ権限の関係"></figure>
+<p><em>改善案：スケジュール経路と保護フォルダの権限確認を分けます。</em></p>
+<h3>Launch Agent の定義</h3>
+<p><strong>小さな plist にします</strong></p>
+<p>plist の役割は最小限にするのが安全です。ジョブを識別し、安定した実行ファイルまたはスクリプトを一つ呼び出し、予定とログ先を定義します。長い処理ロジックは設定値ではなくスクリプトに置きます。</p>
+<p>ユーザー単位の agent は通常、ユーザーの Library/LaunchAgents に配置します。Label は一意にします。ProgramArguments では、実行ファイルと各引数を別々の値として指定します。これにより、実際には行われない可能性があるシェル解析に依存せずに済みます。</p>
+<p><strong>明示的なパスを使います</strong></p>
+<p>バックグラウンドジョブは、Terminal と同じ PATH、現在のディレクトリ、alias、シェル設定を前提にできません。実行ファイル、スクリプト、入力、出力、ログには絶対パスを使います。作業ディレクトリが必要なら明示的に設定します。</p>
+<p><strong>証拠を残します</strong></p>
+<p>標準出力と標準エラーは、あとで調べられる場所に保存します。終了コードは失敗を示しますが、原因はエラー文にあります。コマンド不足、誤ったパス、不正な入力、アクセス拒否を区別できます。永続的なログがないスケジュールは調査が困難です。</p>
+<h3>プライバシー権限の影響</h3>
+<p>macOS はプライバシー制御でユーザーデータを保護します。Apple は Desktop、Documents、Downloads、iCloud Drive、ネットワークボリューム、リムーバブルボリュームなどをファイルアクセス制御の対象として挙げています。アクセス可否は、要求したアプリやプロセスによって変わります。</p>
+<p>ここから、よくある違いを説明できます。スクリプトを手動実行すると成功します。同じスクリプトを launchd が起動すると、最初の保護対象ファイルで失敗します。スクリプトの内容は同じでも、アクセス主体と認可の文脈が違うためです。</p>
+<p>Files &amp; Folders は特定の場所へのアクセスを許可します。Full Disk Access はさらに広い権限です。Apple の説明では、ほかのアプリのデータ、バックアップデータ、一部の管理設定を含む、コンピュータ上のすべてのファイルへアクセスできます。強力ですが、すべての自動化ツールに与える既定値には向きません。</p>
+<p>設定は System Settings の Privacy &amp; Security で管理します。重要なのは、必要な特定ツールを許可することです。Terminal に与えた権限だけでは、バックグラウンドの interpreter、CLI、wrapper に同じアクセスがある証明にはなりません。</p>
+<h3>デモ：より安全な設計</h3>
+<p><strong>手順1：通常の作業場所を選びます</strong></p>
+<p>ジョブが個人フォルダを必要としないなら、スクリプト、一時ファイル、ログは保護対象の外に置きます。権限要求を減らし、ジョブが触れられる私的データも狭くできます。</p>
+<p><strong>手順2：保護された入力を分離します</strong></p>
+<p>保護対象を読む必要があるなら、その依存関係を明示します。無関係な launcher に広い権限を与えず、実際にファイルを開く実行ファイルを特定し、必要な範囲だけ許可します。</p>
+<p><strong>手順3：実際の環境でテストします</strong></p>
+<p>Terminal での実行は単体確認にはなりますが、最終テストではありません。agent を読み込み、launchd から起動し、両方の出力と期待する副作用を確認します。最後は、生成されるはずのファイル、記録、メッセージそのものを検証します。</p>
+<p><strong>手順4：明確に失敗させます</strong></p>
+<p>高価な処理の前に、必要な入力を読めるか確認します。拒否された場合は停止し、対象パスの種類と、権限を見直すべき実行ファイルを明示します。入力不足を空の結果として処理しないようにします。</p>
+<h3>利点と欠点</h3>
+<p><strong>利点</strong></p>
+<ul><li>launchd は user agent と daemon を管理する共通の場所を提供します。</li><li>短い plist は予定とコマンドを確認しやすくします。</li><li>明示したログ先に無人実行の証拠を残せます。</li><li>最小権限の配置により、個人データへの不要なアクセスを減らせます。</li></ul>
+<p><strong>欠点</strong></p>
+<ul><li>対話シェルと launchd の環境は異なることがあります。</li><li>プライバシーの失敗が、通常のファイル不在や権限エラーに見えることがあります。</li><li>Full Disk Access は問題を解決できても、必要以上の権限を与える場合があります。</li><li>user agent はユーザーセッションに依存し、すべてのシステムサービスの代わりにはなりません。</li></ul>
+<h3>考察</h3>
+<p>launchd とプライバシー制御は補完関係にあります。launchd は、いつ、どのようにプロセスを始めるかを決めます。プライバシー制御は、そのプロセスがどのデータに触れられるかを決めます。片方だけでは代替できません。</p>
+<p>調査は順番に行います。まず、launchd が意図したジョブを読み込み、開始したか確認します。次に標準エラーを読みます。その後、絶対パスと実行環境を確認します。さらに、保護データを実際に扱う実行ファイルの権限を確認します。最後に、プロセス状態だけでなく本来の出力を検証します。</p>
+<p>私は最初から Full Disk Access を与える設計にはしません。まず、機密性のない作業ファイルを保護フォルダの外へ移し、ジョブが必要とするデータを減らします。広い権限は標準的な修正ではなく、意図的な例外にします。</p>
+<h3>まとめ</h3>
+<p>macOS のバックグラウンドジョブは、正しく予定されてもデータへのアクセスを拒否される場合があります。安定した自動化には、小さな launchd 定義、絶対パス、永続ログ、実環境テスト、必要最小限の権限が必要です。</p>
+<p>重要なのは二つの仕組みを分けて調べることです。スケジューラが動いたことを確認し、次に実際の実行ファイルが必要な読み書きを許可されていたか確認します。</p>
+<h3>今後</h3>
+<p>plist の構文、すべての絶対パス、入力の可読性、最新の標準エラーを確認する小さな事前検査スクリプトを作りたいです。また、「開始」と「完了」を区別できる最終成功マーカーも追加したいです。これらは改善案であり、launchd 自体の機能ではありません。</p>
+<h3>参考</h3>
+<p><strong>Apple Developer</strong></p>
+<p>Creating Launch Daemons and Agents: <a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html</a></p>
+<p><strong>Apple Platform Security</strong></p>
+<p>Controlling app access to files in macOS: <a href="https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web">https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web</a></p>
+<p><strong>Apple Support</strong></p>
+<p>Change Privacy &amp; Security settings on Mac: <a href="https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac">https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

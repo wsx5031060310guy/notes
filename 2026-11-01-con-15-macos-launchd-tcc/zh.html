@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>macOS 背景工作：launchd 與隱私權權限</title></head>
+<body>
+<h1>macOS 背景工作：launchd 與隱私權權限</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/zh-cover.png" alt="macOS 背景工作：launchd 與隱私權權限"></figure>
+<p>同一個指令在 Terminal 可以執行，到了 launchd 卻可能失敗，因為排程與檔案存取是兩套不同的機制。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>前言</li><li>概觀</li><li>如何定義 Launch Agent</li><li>隱私權權限為何改變結果</li><li>示範：更安全的設計</li><li>優點與缺點</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>前言</h3>
+<p>在這篇文章中，我會說明如何理解 macOS 的背景排程工作。排程器是 launchd，存取控制則由 macOS 隱私權機制負責。可靠的工作必須同時滿足這兩層條件。</p>
+<p>互動式 shell 與背景程序不是相同的執行環境。我的 Terminal 應用程式可能已經取得讀取某個資料夾的權限，但 launchd 啟動的工具不一定有相同權限。指令可以正確，排程也可以準時觸發，工作仍可能無法讀取輸入資料。</p>
+<p>因此，真正要問的不只是「launchd 有沒有啟動工作」，還要問「是哪一個執行檔嘗試開啟檔案，而它是否被允許這樣做」。</p>
+<h3>概觀</h3>
+<p>Apple 將 launchd 說明為啟動每位使用者背景程序的建議方式。這類程序稱為 user agent，屬於已登入的使用者，並在該使用者登入期間執行。系統層級的 daemon 則有不同的範圍與存放位置。</p>
+<p>launchd 工作由 property list 定義，通常稱為 plist。設定會提供唯一的 Label 與 ProgramArguments，也能描述何時執行，以及標準輸出與標準錯誤要寫到哪裡。</p>
+<p>若要依日曆排程，可以使用 StartCalendarInterval。但排程只是設計的一部分。工作還需要明確的絕對路徑、可預期的工作資料、可檢查的日誌，以及讀寫所有必要檔案的權限。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/zh-diagram-1.png" alt="launchd 排程與 macOS 資料夾權限如何互動"></figure>
+<p><em>建議的設計：將排程路徑與受保護資料夾的權限檢查分開。</em></p>
+<h3>如何定義 Launch Agent</h3>
+<p><strong>保持 plist 精簡</strong></p>
+<p>我偏好讓 plist 只做必要的事：識別工作、呼叫一個穩定的執行檔或腳本、定義排程，並把輸出送到已知的日誌檔。實際業務邏輯應該放在腳本，而不是塞進很長的設定值。</p>
+<p>每位使用者的 agent 通常放在使用者的 Library/LaunchAgents 資料夾。Label 應該保持唯一。ProgramArguments 應將執行檔與每一個參數分成獨立值，避免依賴可能根本不會發生的 shell 解析。</p>
+<p><strong>使用明確路徑</strong></p>
+<p>背景工作不應假設自己擁有 Terminal 裡相同的 PATH、目前目錄、alias 或 shell 設定。我會對執行檔、腳本、輸入、輸出與日誌使用絕對路徑。若程式需要工作目錄，我會明確設定，或在腳本裡主動切換。</p>
+<p><strong>保留證據</strong></p>
+<p>標準輸出與標準錯誤應寫到之後可以檢查的位置。結束代碼能告訴我工作失敗，錯誤文字則能區分缺少指令、路徑錯誤、輸入無效或存取遭拒。沒有持久日誌的排程很難除錯。</p>
+<h3>隱私權權限為何改變結果</h3>
+<p>macOS 透過隱私權控制保護使用者資料。Apple 列出的檔案存取控制位置包括 Desktop、Documents、Downloads、iCloud Drive、網路磁碟區與可移除磁碟區。是否可以存取，可能取決於提出要求的應用程式或程序。</p>
+<p>這可以解釋常見的落差：我手動執行腳本時成功，之後 launchd 啟動同一支腳本，卻在第一個受保護檔案失敗。腳本文字沒有改變，但實際提出存取要求的程序與授權環境不同。</p>
+<p>Files &amp; Folders 權限可以開放特定位置。Full Disk Access 的範圍更廣。Apple 說明它能存取電腦上的所有檔案，包括其他應用程式的資料、備份資料與部分管理設定。它很強大，但不適合成為所有自動化工具的預設權限。</p>
+<p>這些設定位於 System Settings 的 Privacy &amp; Security。重點是授權真正需要存取的特定工具。只授權 Terminal，並不能證明背景執行的 interpreter、命令列工具或 wrapper 也有相同權限。</p>
+<h3>示範：更安全的設計</h3>
+<p><strong>步驟一：選擇一般工作區</strong></p>
+<p>若工作不需要個人資料夾，我會把自動化腳本、暫存檔與日誌放在受保護資料夾之外。這可以減少權限需求，也能縮小程式可接觸的私人資料範圍。</p>
+<p><strong>步驟二：隔離受保護輸入</strong></p>
+<p>若工作一定要讀取受保護位置，我會把這項相依關係寫清楚。我不會對無關的啟動器開放廣泛權限，而會找出真正開啟檔案的執行檔，只授予流程需要的範圍。</p>
+<p><strong>步驟三：在真實環境測試</strong></p>
+<p>在 Terminal 執行是有用的單元檢查，但不是最後測試。我會載入 agent，透過 launchd 觸發，再檢查兩種輸出與預期副作用。最終應驗證工作本來要產生的檔案、紀錄或訊息，而不只看程序狀態。</p>
+<p><strong>步驟四：清楚地失敗</strong></p>
+<p>腳本應在進行昂貴工作前，先檢查必要輸入是否可讀。若存取遭拒，程式應停止，並直接說明路徑類型與需要檢查權限的執行檔。不要悄悄把缺少輸入當成空結果。</p>
+<h3>優點與缺點</h3>
+<p><strong>優點</strong></p>
+<ul><li>launchd 提供管理 user agent 與 daemon 的統一位置。</li><li>精簡 plist 讓排程與指令容易檢查。</li><li>明確日誌路徑能保留無人執行時的證據。</li><li>最小權限的檔案配置可減少不必要的個人資料存取。</li></ul>
+<p><strong>缺點</strong></p>
+<ul><li>互動式 shell 與 launchd 的環境可能不同。</li><li>隱私權失敗可能看起來像一般的找不到檔案或權限錯誤。</li><li>Full Disk Access 雖能解決問題，也可能授予遠超過工作需要的權力。</li><li>user agent 依賴使用者工作階段，不能取代所有系統服務。</li></ul>
+<h3>討論</h3>
+<p>我認為 launchd 與隱私權控制是互補關係。launchd 回答程序何時、如何啟動；隱私權控制回答該程序可以接觸哪些資料。兩者不能互相取代。</p>
+<p>安全的除錯順序很直接。先確認 launchd 已載入並啟動預期工作，再查看標準錯誤，接著檢查絕對路徑與執行環境。之後，確認真正接觸受保護資料的執行檔具有權限。最後驗證實際輸出，而不只看程序狀態。</p>
+<p>我不會一開始就授予 Full Disk Access。我會先將非敏感工作檔移出受保護資料夾，並減少工作需要的資料範圍。廣泛權限應是經過判斷的例外，而不是標準修復方式。</p>
+<h3>結論</h3>
+<p>macOS 背景工作即使排程正確，仍可能被阻擋而無法取得資料。可靠的自動化需要精簡的 launchd 定義、明確路徑、持久日誌、真實環境測試，以及實務上最小的權限。</p>
+<p>核心做法是分開除錯這兩套系統：先確認排程器確實執行，再確認真正負責的執行檔被允許讀寫工作所需內容。</p>
+<h3>其他</h3>
+<p>我想做一支小型事前檢查腳本，驗證 plist 語法、所有絕對路徑、輸入可讀性，並顯示最新一行標準錯誤。我也想加入最後成功標記，讓監控能區分「已開始」與「已完成」。這些都是建議的改進，不是 launchd 本身已提供的功能。</p>
+<h3>參考</h3>
+<p><strong>Apple Developer</strong></p>
+<p>Creating Launch Daemons and Agents: <a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html</a></p>
+<p><strong>Apple Platform Security</strong></p>
+<p>Controlling app access to files in macOS: <a href="https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web">https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web</a></p>
+<p><strong>Apple Support</strong></p>
+<p>Change Privacy &amp; Security settings on Mac: <a href="https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac">https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

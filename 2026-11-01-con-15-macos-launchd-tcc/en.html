@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Background Jobs on macOS: launchd and Privacy Permissions</title></head>
+<body>
+<h1>Background Jobs on macOS: launchd and Privacy Permissions</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/en-cover.png" alt="Background Jobs on macOS: launchd and Privacy Permissions"></figure>
+<p>A scheduled command can work in Terminal and still fail under launchd because scheduling and file access are two separate systems.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>How a launch agent is defined</li>
+<li>Why privacy permissions change the result</li>
+<li>Demo: a safer design</li>
+<li>Benefits and drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>In this blog, I will explain how I think about scheduled background work on macOS. The scheduler is launchd. The access-control layer is the macOS privacy system. A reliable job has to satisfy both.</p>
+<p>This distinction matters because an interactive shell is not the same execution context as a background process. My Terminal app may already have permission to read a folder. A tool launched by launchd may not have the same permission. The command can be correct, the schedule can fire, and the job can still be unable to read its input.</p>
+<p>The useful question is therefore not only, “Did launchd start the job?” I also need to ask, “Which executable tried to open the file, and was that executable allowed to do it?”</p>
+<h3>Overview</h3>
+<p>Apple describes launchd as the preferred way to start per-user background processes. These processes are called user agents. A user agent belongs to a logged-in user and runs only while that user is logged in. System-level daemons have a different scope and location.</p>
+<p>A launchd job is described by a property list, usually called a plist. The configuration gives the job a unique label and provides the program arguments. It can also describe when the job should run and where standard output and standard error should go.</p>
+<p>For a calendar schedule, a job can use StartCalendarInterval. The schedule is only one part of the design. The job also needs absolute paths, predictable working data, useful logs, and permission to reach every required file.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-01-con-15-macos-launchd-tcc/en-diagram-1.png" alt="How launchd scheduling and macOS folder permissions interact"></figure>
+<p><em>Proposed design: separate the scheduling path from the protected-folder permission check.</em></p>
+<h3>How a Launch Agent Is Defined</h3>
+<p><strong>Use a small plist</strong></p>
+<p>I prefer a plist that does as little as possible. It should identify the job, call one stable executable or script, define the schedule, and send output to known log files. The business logic belongs in the script, not in a long configuration value.</p>
+<p>A per-user agent is normally placed in the user’s Library/LaunchAgents directory. Its Label should be unique. ProgramArguments should hold the executable and each argument as separate values. This avoids depending on shell parsing that may not happen at all.</p>
+<p><strong>Use explicit paths</strong></p>
+<p>A background job should not assume the same PATH, current directory, aliases, or shell setup that I see in Terminal. I use absolute paths for the executable, script, input, output, and logs. If the script needs a working directory, I set it deliberately or change to it inside the script.</p>
+<p><strong>Keep evidence</strong></p>
+<p>Standard output and standard error should be written somewhere I can inspect. An exit code tells me that something failed. The error text tells me whether the cause was a missing command, a bad path, invalid input, or denied access. A schedule without durable logs is difficult to debug.</p>
+<h3>Why Privacy Permissions Change the Result</h3>
+<p>macOS protects user data through privacy controls. Apple lists Desktop, Documents, Downloads, iCloud Drive, network volumes, and removable volumes among locations covered by file-access controls. Access can depend on the app or process that requests it.</p>
+<p>This explains a common surprise. I run a script manually and it succeeds. Later, launchd starts the same script and it fails at the first protected file. The script text did not change. The responsible process and its authorization context did.</p>
+<p>Files &amp; Folders permission grants access to specific locations. Full Disk Access is broader. Apple describes it as access to all files on the computer, including data from other apps, backup data, and certain administrative settings. That makes it powerful, but it also makes it a poor default for every automation tool.</p>
+<p>The setting is managed in System Settings under Privacy &amp; Security. The important detail is to authorize the specific tool that needs access. Granting permission to Terminal does not automatically prove that a background interpreter, command-line tool, or wrapper has the same access.</p>
+<h3>Demo: A Safer Design</h3>
+<p><strong>Step 1: choose an ordinary workspace</strong></p>
+<p>I would keep automation scripts, temporary files, and logs outside protected personal folders when the job does not need those folders. This reduces permission prompts and narrows the amount of private data the job can reach.</p>
+<p><strong>Step 2: isolate the protected input</strong></p>
+<p>If the job must read a protected location, I would make that dependency explicit. I would avoid giving broad access to unrelated launchers. I would identify the actual executable that opens the file and grant only the access the workflow requires.</p>
+<p><strong>Step 3: test in the real context</strong></p>
+<p>Running the script in Terminal is a useful unit check, but it is not the final test. I would load the agent, trigger it through launchd, then inspect both output streams and the expected side effect. The final check should verify the file, record, or message that the job was supposed to create.</p>
+<p><strong>Step 4: fail clearly</strong></p>
+<p>The script should check that required input is readable before doing expensive work. If access is denied, it should stop with a direct message that names the path category and the executable that needs review. It should not quietly treat missing input as an empty result.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits</strong></p>
+<ul>
+<li>launchd gives macOS one managed place for user agents and daemons.</li>
+<li>A short plist makes the schedule and command easy to review.</li>
+<li>Explicit log paths preserve evidence from unattended runs.</li>
+<li>Least-privilege file placement reduces unnecessary access to personal data.</li>
+</ul>
+<p><strong>Drawbacks</strong></p>
+<ul>
+<li>The interactive shell and launchd environment can behave differently.</li>
+<li>Privacy failures may look like ordinary file-not-found or permission errors.</li>
+<li>Full Disk Access can solve an access problem while granting much more authority than the job needs.</li>
+<li>A user agent depends on the user session, so it is not a replacement for every system service.</li>
+</ul>
+<h3>Discussion</h3>
+<p>I see launchd and privacy controls as complementary. launchd answers when and how a process starts. Privacy controls answer what data that process may reach. Neither layer can replace the other.</p>
+<p>The safest troubleshooting order is simple. First, confirm that launchd loaded and started the intended job. Second, inspect standard error. Third, check absolute paths and the runtime environment. Fourth, review privacy permission for the executable that actually touches the protected data. Finally, verify the real output, not only the process status.</p>
+<p>I would not begin by granting Full Disk Access. I would first move non-sensitive working files out of protected folders and reduce the job’s data requirements. Broad access should be a deliberate exception, not the standard repair.</p>
+<h3>Conclusion</h3>
+<p>A background job on macOS can be scheduled correctly and still be blocked from its data. Reliable automation needs a small launchd definition, explicit paths, durable logs, a real-context test, and the narrowest practical permission.</p>
+<p>The key lesson is to debug the two systems separately. Confirm that the scheduler ran. Then confirm that the responsible executable was allowed to read and write what the job needed.</p>
+<h3>Other</h3>
+<p>I want to build a small preflight script that checks the plist syntax, confirms every absolute path, tests input readability, and prints the latest standard-error line. I also want to add a final success marker so a monitor can distinguish “started” from “finished.” These are proposed improvements, not features of launchd itself.</p>
+<h3>Reference</h3>
+<p><strong>Apple Developer</strong></p>
+<p>Creating Launch Daemons and Agents: <a href="https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html">https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html</a></p>
+<p><strong>Apple Platform Security</strong></p>
+<p>Controlling app access to files in macOS: <a href="https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web">https://support.apple.com/guide/security/controlling-app-access-to-files-secddd1d86a6/web</a></p>
+<p><strong>Apple Support</strong></p>
+<p>Change Privacy &amp; Security settings on Mac: <a href="https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac">https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
