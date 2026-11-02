@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>My Laptop Backup Had Not Run for 37 Days, and macOS Privacy Rules Were Why</title></head>
+<body>
+<h1>My Laptop Backup Had Not Run for 37 Days, and macOS Privacy Rules Were Why</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-02-exp-17-laptop-backup-tcc/en-cover.png" alt="My Laptop Backup Had Not Run for 37 Days, and macOS Privacy Rules Were Why"></figure>
+<p>In this blog, I will describe how a macOS permission boundary turned an automated laptop backup into a manual task and left the last completed run 37 days old.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>Overview</li>
+<li>Why the Scheduled Run Failed</li>
+<li>How the Monitor Found It</li>
+<li>Recovery and Current State</li>
+<li>Benefits and Drawbacks</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I use a script to copy work folders from my laptop to an external disk on my home server. The script uses rsync. It does not use <strong>--delete</strong>. That choice means files removed from the laptop are not automatically removed from the destination mirror.</p>
+<p>The intended workflow was simple. A launchd job would start the script in the background. The script would copy the folders. At the end, it would write a completion stamp containing the time and the exit code. A monitor would read that stamp and warn when the last successful run became too old.</p>
+<p>The copy command itself was not the difficult part. The problem was the context in which it ran. macOS applies privacy controls to protected user folders. A command that works in an interactive terminal does not automatically have the same access when launchd starts it in the background.</p>
+<h3>Overview</h3>
+<p>When launchd started the backup, the script tried to read files under <strong>~/Documents</strong>. macOS refused the read with “Operation not permitted.” The scheduled run could not complete.</p>
+<p>After that failure, I ran the backup only by hand. Manual execution kept the process available, but it removed the regular schedule. The gap was easy to overlook because a backup that does not run may produce less visible noise than a backup that runs and reports an error.</p>
+<p>The last completed run was 37 days old when the monitor flagged it. The monitor did not infer freshness from the destination files. It used the explicit completion stamp written by the backup script at the end.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-02-exp-17-laptop-backup-tcc/en-diagram-1.png" alt="How the launchd backup failed and the stale-run monitor detected it"></figure>
+<p><em>The scheduled path: launchd reached a protected folder, the run ended without a completion stamp, and the monitor later detected that the stamp was stale.</em></p>
+<h3>Why the Scheduled Run Failed</h3>
+<p>It is tempting to treat a shell script as one fixed program. On macOS, the process that launches it matters. A terminal application can have privacy permission that a background process does not have. The same script, path, and rsync arguments can therefore behave differently.</p>
+<p>In this case, the launchd job did not have the access needed to read files under Documents. The operating system returned “Operation not permitted.” This was a privacy decision, not a network error and not an rsync algorithm problem.</p>
+<p>Granting Full Disk Access is the step needed before this backup can be scheduled again. That permission has <strong>not</strong> been granted yet. I do not want to describe the automation as restored when only the data copy has been brought up to date.</p>
+<p>This distinction matters in operational notes. “The backup is current” and “the backup is automated” are separate claims. A successful manual run can make the first statement true. It does not make the second statement true.</p>
+<h3>How the Monitor Found It</h3>
+<p>The monitor reads a completion stamp with two fields: the finish time and the process exit code. The backup script writes it only at the end. The monitor warns when the last completion is more than seven days old.</p>
+<p>This is stronger than checking modification times in the mirror. File timestamps can change for many reasons, and they can also remain unchanged during a legitimate backup when the source content has not changed. A directory that looks recent does not prove that the complete workflow reached its final step.</p>
+<p>An explicit completion stamp answers a narrower and more useful question: did the script reach the end, and what exit code did it record? In this incident, the old stamp made the missing successful runs visible. It did not claim that the schedule was healthy merely because launchd attempted to start something.</p>
+<p>The seven-day threshold also separates the expected cadence from the implementation details. The monitor does not need to understand every rsync message. It only needs to know how old the latest completed run is.</p>
+<h3>Recovery and Current State</h3>
+<p>I ran the backup manually and brought the mirror up to date. Because the script does not use <strong>--delete</strong>, the recovery copied current work folders without removing destination files that were absent from the laptop.</p>
+<p>The current limitation remains clear: the next scheduled design needs Full Disk Access to read the protected folders. Until that permission is granted and a background run is verified, manual execution is the working path.</p>
+<p>A proper verification should test the same context that will be used in normal operation. Running the command in a terminal proves that the script and destination can work interactively. It does not prove that launchd can read the source. After permission is configured, I want to trigger the job through launchd and then check the new completion stamp.</p>
+<h3>Benefits and Drawbacks</h3>
+<p><strong>Benefits of the current design</strong></p>
+<ul>
+<li>rsync gives the script a direct way to copy the selected work folders.</li>
+<li>Omitting <strong>--delete</strong> avoids automatically removing destination files during a mirror update.</li>
+<li>The completion stamp gives the monitor a concrete end-of-run signal.</li>
+<li>The seven-day warning can detect a backup that fails by not completing.</li>
+</ul>
+<p><strong>Drawbacks and limits</strong></p>
+<ul>
+<li>The launchd job cannot read Documents without the required macOS permission.</li>
+<li>Manual runs depend on a person remembering to start them.</li>
+<li>A fresh manual copy does not demonstrate that scheduled execution works.</li>
+<li>A completion stamp reports the script’s recorded finish and exit code; it should not be confused with a full restore test.</li>
+</ul>
+<p>The main lesson is not that privacy controls are bad. The control behaved as designed. The lesson is that automation crosses security boundaries, and every boundary has to be tested in the actual execution context.</p>
+<h3>Discussion</h3>
+<p>Backup failures are often discussed as copy failures: a disk is full, a connection drops, or a file is unreadable. A missing run is different. Nothing reaches the copy stage, so there may be no new destination activity to inspect.</p>
+<p>That is why end-of-run evidence is valuable. A scheduler start event tells me that launchd attempted to run the job. The completion stamp tells me that the script reached its own final step. The age of that stamp turns silence into a measurable condition.</p>
+<p>This incident also reinforced a simple wording rule for status reports. I should report exactly what I verified. I verified that a manual run updated the mirror. I have not verified a repaired launchd schedule, because the required Full Disk Access has not been granted.</p>
+<h3>Conclusion</h3>
+<p>The backup became stale because launchd could not read a protected folder, and the process then depended on manual runs. Thirty-seven days passed between completed runs before the monitor warned about the old completion stamp.</p>
+<p>A manual rsync run brought the mirror up to date. The scheduling problem remains open. Full Disk Access must be granted before launchd can be used again, and the background path must be tested directly.</p>
+<p>The most useful design choice was the completion stamp. It measured whether the job finished, not whether a scheduler entry existed or a destination directory looked active.</p>
+<h3>Other</h3>
+<p>I want to grant the required permission deliberately, trigger the backup through launchd, and verify the new completion time and exit code. I also want to keep the stale-run warning as an independent check after scheduling is restored.</p>
+<p>A further test I want to perform is a restore check from the external mirror. A completed copy and a usable recovery are related, but they are not the same claim. That test is a plan, not something completed in this incident.</p>
+<h3>Reference</h3>
+<p><strong>Apple macOS User Guide</strong></p>
+<p>Control access to files and folders on Mac: <a href="https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac">https://support.apple.com/guide/mac-help/control-access-to-files-and-folders-on-mac-mchld5a35146/mac</a></p>
+<p><strong>rsync documentation</strong></p>
+<p>rsync manual page: <a href="https://man7.org/linux/man-pages/man1/rsync.1.html">https://man7.org/linux/man-pages/man1/rsync.1.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
