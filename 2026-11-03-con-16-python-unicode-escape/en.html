@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Python's unicode_escape Codec Is Not What Its Name Suggests</title></head>
+<body>
+<h1>Python's unicode_escape Codec Is Not What Its Name Suggests</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/en-cover.png" alt="Python's unicode_escape Codec Is Not What Its Name Suggests"></figure>
+<p>In this blog, I will explain why a tempting one-line Unicode fix can quietly damage text that was already correct.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview: JSON, escapes, and text encodings</li>
+<li>Demo: where unicode_escape goes wrong</li>
+<li>Safer ways to decode escapes</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>Text bugs often begin with two values that look similar in a log. One value contains an actual newline. Another contains the two visible characters backslash and n. A third may contain a raw control character inside JSON, which is not the same as either of the first two.</p>
+<p>When these cases are mixed together, a line such as value.encode("utf-8").decode("unicode_escape") looks useful. It appears to turn escape sequences into the characters they represent. It may even work for an ASCII-only sample. Then Chinese, Japanese, or an emoji enters the input and comes out as mojibake.</p>
+<p>The name unicode_escape makes the operation sound like a general Unicode repair tool. It is not. It is a Python-specific escape codec. Before using it, I need to know whether I am parsing JSON, decoding bytes, or interpreting a small escape language. Those are separate jobs.</p>
+<h3>Overview</h3>
+<p><strong>JSON parsing has its own rules</strong></p>
+<p>A JSON string can represent a newline with the escape sequence backslash-n. The JSON parser interprets that sequence while parsing. A literal unescaped control character inside the quoted string is different. Python's json decoder rejects such control characters in its default strict mode.</p>
+<p>The json.loads function also has a strict parameter. With strict=False, the decoder allows control characters inside strings. That setting is sometimes useful when an upstream system emits nonstandard JSON, but it does not repair arbitrary encoding damage. It only changes what the JSON parser accepts inside string values.</p>
+<p>This distinction matters because a JSON error should first be treated as a JSON problem. If the payload is valid JSON, json.loads already handles JSON escapes. Applying another escape decoder afterward can decode text twice or reinterpret characters that were never meant to be escapes.</p>
+<p><strong>A codec maps one representation to another</strong></p>
+<p>UTF-8 is a text encoding. It maps Unicode text to bytes and maps valid UTF-8 bytes back to text. The unicode_escape codec has another purpose. Its decoder interprets Python-style escape sequences. For byte values that are not part of an escape, its behavior follows a single-byte view rather than first decoding those bytes as UTF-8 text.</p>
+<p>That is why encoding a correct string as UTF-8 and then decoding those bytes with unicode_escape is unsafe. The first operation may turn one non-ASCII character into several bytes. The second operation reads each byte under the wrong rules. The bytes survive, but their meaning does not.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/en-diagram-1.png" alt="How a correct Unicode string becomes mojibake through the wrong codec"></figure>
+<p><em>UTF-8 bytes passed to unicode_escape are interpreted under the wrong contract.</em></p>
+<h3>Demo</h3>
+<p>Consider a Python string that contains ordinary Chinese text followed by the visible sequence backslash-n. The programmer wants to convert only that sequence into a newline. The string is already Unicode text, so its Chinese characters do not need decoding.</p>
+<p>The risky shortcut first calls encode with UTF-8. Now each Chinese character is represented by multiple bytes. It then calls decode with unicode_escape. That decoder can recognize backslash-n, but it also handles the other bytes as though they belong to its own input format. The result can contain the expected newline and broken Chinese at the same time. A test that checks only for the newline will miss the damage.</p>
+<p>ASCII examples hide the problem. ASCII characters use the same byte values in UTF-8 and many single-byte interpretations. The shortcut therefore appears correct for a value such as hello backslash-n world. Passing that test says little about multilingual input.</p>
+<p>I would test at least four kinds of values: plain ASCII, text that contains an intended escape, non-ASCII text with no escapes, and non-ASCII text next to an intended escape. I would also include a literal backslash that must remain a backslash. The expected output should be written explicitly for every case.</p>
+<p><strong>strict=False solves a narrower problem</strong></p>
+<p>If a JSON producer sends a literal newline inside a quoted value, default json.loads rejects it because the newline is a control character. Using strict=False tells the decoder to accept that input. It does not mean "decode Unicode more aggressively," and it does not make a later unicode_escape pass safe.</p>
+<p>There is a trade-off. Accepting nonstandard input can help at a controlled boundary, but it can also hide a broken producer. I prefer to record that the input was nonstandard, limit the accepted payload size, and keep the relaxed behavior close to the boundary. The rest of the program should receive normal Python strings.</p>
+<h3>Safer ways to decode escapes</h3>
+<p><strong>Let the format parser do the work</strong></p>
+<p>If the source is JSON, parse the complete JSON value once. Do not extract a field with string slicing and then run a second generic escape decoder. The parser knows how quotes, backslashes, Unicode escapes, and control characters fit together.</p>
+<p>If the source is not JSON, define the exact escapes the application supports. For example, a small configuration field may allow only backslash-n and backslash-t. A targeted replacement or a small parser can interpret those sequences while leaving every other character untouched. It is less clever than a broad codec, which is exactly why it is easier to reason about.</p>
+<p>Another safe pattern is to keep the distinction in the data model. A value can be marked as raw escaped text until one named boundary decodes it. After that boundary, the program treats it as Unicode text and never decodes it again. This avoids the common question, "Has this value already been unescaped?"</p>
+<p><strong>Keep bytes and text separate</strong></p>
+<p>I use bytes when reading a file, socket, or other byte source. I decode those bytes once with the encoding promised by that source, often UTF-8. From then on, I use Python str values. If escape syntax exists inside the text, I process that syntax separately instead of converting the whole string back to bytes.</p>
+<p>Error handlers deserve the same care. Ignoring or replacing decoding errors can keep a pipeline moving, but it also discards evidence. At a system boundary, a clear failure with a short sample and source information is usually more useful than silently altered text.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits of the narrow approach</strong></p>
+<p>A narrow parser has an obvious contract. It changes only the sequences the application documents. Multilingual text passes through unchanged. Tests can cover the full set of accepted escapes, and an unknown escape can remain literal or produce a clear error.</p>
+<p>Using json.loads for JSON has another benefit: one parser handles the structure and the string escaping together. There is no second transformation whose behavior depends on what the first transformation already did.</p>
+<p><strong>Drawbacks and limits</strong></p>
+<p>A targeted parser takes a little more code than the one-line shortcut. It also forces a decision about malformed input. Should an unknown escape fail, remain unchanged, or be logged? The right answer depends on the boundary.</p>
+<p>Using strict=False can be practical when I do not control the producer, but it widens the accepted input. I would not make it a global habit. It is better as a documented compatibility choice with tests showing the exact malformed payload it is meant to accept.</p>
+<p>The larger lesson is that visible text, Unicode code points, encoded bytes, and escape syntax are different layers. A function that helps at one layer can corrupt another layer even when every call succeeds.</p>
+<h3>Conclusion</h3>
+<p>unicode_escape is not a general fix for Unicode text. It interprets Python escape syntax under a specific byte contract. The common encode-as-UTF-8 and decode-as-unicode_escape shortcut breaks that contract and can turn correct non-ASCII text into mojibake.</p>
+<p>For JSON, I let the JSON parser handle JSON escapes and use strict=False only when I have deliberately chosen to accept raw control characters. For a custom text field, I decode only the small set of escapes that field supports. Most importantly, I decode external bytes once and keep Python text as text.</p>
+<h3>Other</h3>
+<p>I want to build a small regression table for future text-processing code. It will pair raw inputs with exact expected outputs and include Chinese, Japanese, emoji, literal backslashes, valid escapes, unknown escapes, and raw control characters. I also want boundary logs to state whether a value arrived as bytes, JSON text, or already-decoded Python text. That small label could save a long debugging session.</p>
+<h3>Reference</h3>
+<p><strong>Python JSON documentation</strong></p>
+<p>json — JSON encoder and decoder: <a href="https://docs.python.org/3/library/json.html">https://docs.python.org/3/library/json.html</a></p>
+<p><strong>Python codec documentation</strong></p>
+<p>codecs — Codec registry and base classes: <a href="https://docs.python.org/3/library/codecs.html">https://docs.python.org/3/library/codecs.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>

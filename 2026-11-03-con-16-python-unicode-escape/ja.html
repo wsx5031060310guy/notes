@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><title>Python の unicode_escape codec は名前から想像するものとは違う</title></head>
+<body>
+<h1>Python の unicode_escape codec は名前から想像するものとは違う</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/ja-cover.png" alt="Python の unicode_escape codec は名前から想像するものとは違う"></figure>
+<p>この記事では、便利そうな一行の Unicode 修正が、すでに正しい文字列を静かに壊す理由を説明します。</p>
+<p>本記事は、私自身のプロジェクトメモをもとに AI の支援を受けて下書きし、公開前に私が確認しています。</p>
+<h3>目次</h3>
+<ul><li>はじめに</li><li>概要：JSON、エスケープ、文字エンコーディング</li><li>デモ：unicode_escape が壊す場所</li><li>安全にエスケープを処理する方法</li><li>考察</li><li>まとめ</li><li>今後</li><li>参考</li></ul>
+<h3>はじめに</h3>
+<p>文字列の不具合は、ログ上では似て見える値を混同したところから始まりがちです。一つは実際の改行を含む値です。別の値は、バックスラッシュと n という二つの文字を含みます。さらに、JSON の引用符内に生の制御文字が入っている場合もあります。この三つは同じではありません。</p>
+<p>これらを一緒に扱うと、value.encode("utf-8").decode("unicode_escape") のような一行が魅力的に見えます。エスケープ表記を実際の文字へ変換してくれそうだからです。ASCII だけのサンプルでは動くこともあります。しかし、中国語、日本語、絵文字が入力されると文字化けする可能性があります。</p>
+<p>unicode_escape という名前は、Unicode 全般を修復する機能のように見えます。しかし実際は Python 固有のエスケープ codec です。使う前に、私は JSON を解析したいのか、bytes を文字列へ変えたいのか、小さなエスケープ言語を解釈したいのかを分けて考える必要があります。</p>
+<h3>概要</h3>
+<p><strong>JSON の解析には専用の規則があります</strong></p>
+<p>JSON 文字列では、バックスラッシュと n の並びで改行を表現できます。JSON parser は解析時にこの並びを解釈します。一方、引用符の中にエスケープされていない制御文字が直接入っている場合は別です。Python の json decoder は、既定の strict mode ではそのような制御文字を拒否します。</p>
+<p>json.loads には strict 引数もあります。strict=False にすると、文字列内の制御文字を許可します。上流のシステムが標準外の JSON を出す場合には役立つことがありますが、任意の文字化けを直す設定ではありません。JSON parser が文字列値の中で何を受け入れるかだけを変えます。</p>
+<p>JSON のエラーは、まず JSON の問題として扱うべきです。入力が正しい JSON なら、json.loads が JSON のエスケープを処理します。その後で別の escape decoder をかけると、二重にデコードしたり、本来エスケープではない文字を再解釈したりします。</p>
+<p><strong>codec は表現を別の表現へ対応付けます</strong></p>
+<p>UTF-8 は文字エンコーディングです。Unicode text を bytes にし、正しい UTF-8 bytes を text に戻します。unicode_escape codec の目的は別です。その decoder は Python 形式のエスケープを解釈します。エスケープに含まれない byte については、最初に UTF-8 として文字へ戻すのではなく、単一 byte の見方で扱います。</p>
+<p>そのため、正しい文字列を UTF-8 で encode し、その bytes を unicode_escape で decode するのは危険です。最初の処理で、一つの非 ASCII 文字が複数の bytes になります。次の処理は、それらを別の規則で読みます。bytes は残っていても、意味は失われます。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/ja-diagram-1.png" alt="正しい Unicode 文字列が誤った codec で文字化けする流れ"></figure>
+<p><em>UTF-8 bytes を unicode_escape に渡すと、異なる契約で解釈されます。</em></p>
+<h3>デモ</h3>
+<p>普通の中国語テキストの後ろに、見える形のバックスラッシュと n がある Python 文字列を考えます。変換したいのはその並びだけです。中国語部分はすでに Unicode text なので、decode する必要はありません。</p>
+<p>危険な方法では、最初に UTF-8 で encode します。中国語の各文字は複数の bytes になります。次に unicode_escape で decode します。この decoder はバックスラッシュと n を改行にできますが、ほかの bytes も自分の入力形式として扱います。その結果、改行は期待どおりでも、中国語だけ壊れることがあります。改行の有無だけを調べる test では、この破損を見逃します。</p>
+<p>ASCII の例は問題を隠します。ASCII 文字の byte 値は、UTF-8 と多くの単一 byte 解釈で同じです。そのため、hello、バックスラッシュ、n、world という値では正しく見えます。その test が通っても、多言語入力に対する安全性は確認できません。</p>
+<p>私は少なくとも、通常の ASCII、意図した escape を含む text、escape のない非 ASCII text、意図した escape に隣接する非 ASCII text の四種類を test します。残すべき literal backslash も必要です。それぞれの期待値を明示して比較します。</p>
+<p><strong>strict=False が解決する問題は限定的です</strong></p>
+<p>JSON の生成側が引用符内に生の改行を入れた場合、通常の json.loads は制御文字として拒否します。strict=False は、その入力を許可する指定です。「Unicode を強く decode する」という意味ではなく、その後の unicode_escape 処理を安全にするものでもありません。</p>
+<p>標準外の入力を受け入れると、管理された境界では助かりますが、壊れた生成側を隠すこともあります。私は標準外の入力だった事実を記録し、payload size を制限し、緩い処理を入口の近くに置きたいです。プログラム内部には通常の Python str を渡します。</p>
+<h3>安全にエスケープを処理する方法</h3>
+<p><strong>format parser に任せます</strong></p>
+<p>入力が JSON なら、完全な JSON value を一度だけ解析します。文字列を切り出し、別の汎用 escape decoder をかけるべきではありません。parser は引用符、backslash、Unicode escape、制御文字の関係をまとめて理解しています。</p>
+<p>JSON でなければ、アプリケーションが許す escape を正確に決めます。小さな設定項目なら、バックスラッシュと n、バックスラッシュと t だけを許す設計もできます。対象を絞った置換や小さな parser なら、それ以外の文字をそのまま残せます。広い codec より単純なので、挙動を説明しやすくなります。</p>
+<p>data model で状態を分ける方法もあります。値は一つの決められた境界まで raw escaped text として扱い、そこで一度だけ decode します。その後は Unicode text とし、再び decode しません。これで「この値はすでに unescape されたか」という曖昧さを減らせます。</p>
+<p><strong>bytes と text を分けます</strong></p>
+<p>file や socket などから読むときは bytes を扱います。その発信元が約束した encoding、たとえば UTF-8 で一度だけ decode します。それ以降は Python str を使います。text 内に escape syntax があっても、文字列全体を bytes に戻さず、その syntax だけを別に処理します。</p>
+<p>error handler にも注意が必要です。decode error を無視または置換すれば処理は続きますが、調査の手掛かりも失います。system boundary では、短いサンプルと入力元を付けて明確に失敗させた方が、静かに文字を変えるより役立つことが多いです。</p>
+<h3>考察</h3>
+<p><strong>狭い処理の利点</strong></p>
+<p>対象を絞った parser は契約が明確です。仕様に書いた並びだけを変え、多言語 text はそのまま通します。受け入れる escape の全種類を test でき、未知の escape は文字のまま残すか、明確な error にできます。</p>
+<p>JSON に json.loads を使えば、構造と文字列 escape を一つの parser が一緒に処理します。先の処理結果に依存する二回目の変換がありません。</p>
+<p><strong>欠点と制限</strong></p>
+<p>対象を絞った parser は、一行の近道より少し多くの code が必要です。壊れた入力をどう扱うかも決めなければなりません。未知の escape で失敗するのか、そのまま残すのか、log に記録するのかは境界によって変わります。</p>
+<p>生成側を管理できない場合、strict=False は実用的です。ただし受け入れる入力範囲が広がるため、常用はしません。許可したい不正 payload を test で示し、互換性のための判断として文書化する方が安全です。</p>
+<p>見える text、Unicode code point、encoded bytes、escape syntax は別の layer です。一つの layer で便利な関数でも、別の layer では、すべての呼び出しが成功したまま data を壊せます。</p>
+<h3>まとめ</h3>
+<p>unicode_escape は Unicode text 全般を直す機能ではありません。特定の byte contract に従って Python の escape syntax を解釈します。UTF-8 で encode してから unicode_escape で decode する近道はその契約を破り、正しい非 ASCII text を文字化けさせます。</p>
+<p>JSON では JSON parser に escape 処理を任せます。strict=False は、生の制御文字を受け入れると意図的に決めた場合だけ使います。独自の text field では、その field が対応する少数の escape だけを処理します。そして外部の bytes は一度だけ decode し、Python text は text のまま保ちます。</p>
+<h3>今後</h3>
+<p>今後の text-processing code のために、小さな regression table を作りたいです。raw input と正確な expected output を組にし、中国語、日本語、絵文字、literal backslash、正しい escape、未知の escape、生の制御文字を含めます。境界の log には、値が bytes、JSON text、すでに decode 済みの Python text のどれで届いたかも記録したいです。</p>
+<h3>参考</h3>
+<p><strong>Python JSON documentation</strong></p>
+<p>json — JSON encoder and decoder: <a href="https://docs.python.org/3/library/json.html">https://docs.python.org/3/library/json.html</a></p>
+<p><strong>Python codec documentation</strong></p>
+<p>codecs — Codec registry and base classes: <a href="https://docs.python.org/3/library/codecs.html">https://docs.python.org/3/library/codecs.html</a></p>
+<p>最後まで読んでいただきありがとうございます。ご質問やご提案があれば、お気軽にコメントしてください。すべてのメッセージに目を通し、できるだけ早く返信します。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>

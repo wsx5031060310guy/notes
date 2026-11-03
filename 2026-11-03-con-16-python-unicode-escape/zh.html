@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><title>Python 的 unicode_escape codec 不是你從名稱想像的那種工具</title></head>
+<body>
+<h1>Python 的 unicode_escape codec 不是你從名稱想像的那種工具</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/zh-cover.png" alt="Python 的 unicode_escape codec 不是你從名稱想像的那種工具"></figure>
+<p>這篇文章要說明，為什麼一行看似方便的 Unicode 修復程式，會悄悄破壞原本正確的文字。</p>
+<p>揭露：本文以我自己的專案筆記為基礎，由 AI 協助草擬，發布前由我本人審閱。</p>
+<h3>目錄</h3>
+<ul><li>前言</li><li>概觀：JSON、跳脫字元與文字編碼</li><li>示範：unicode_escape 如何出錯</li><li>更安全的跳脫處理方式</li><li>討論</li><li>結論</li><li>其他</li><li>參考</li></ul>
+<h3>前言</h3>
+<p>文字問題常從幾個在紀錄裡看起來很像的值開始。第一個值含有真正的換行。第二個值含有反斜線與 n 這兩個看得見的字元。第三個情況，是 JSON 字串裡直接出現未跳脫的控制字元。這三件事並不相同。</p>
+<p>把它們混在一起時，value.encode("utf-8").decode("unicode_escape") 這行程式會顯得很有吸引力。它看起來能把跳脫序列轉成代表的字元，而且在只有 ASCII 的範例裡可能真的有效。等中文、日文或 emoji 進入輸入，結果卻可能變成亂碼。</p>
+<p>unicode_escape 這個名稱很像通用的 Unicode 修復工具，但它不是。它是用來解讀 Python 跳脫語法的 codec。使用之前，我必須先分清楚：現在要解析 JSON、把 bytes 解碼成文字，還是解讀一套小型跳脫語法。這是三種不同的工作。</p>
+<h3>概觀</h3>
+<p><strong>JSON 解析有自己的規則</strong></p>
+<p>JSON 字串可以用反斜線加 n 表示換行，JSON parser 會在解析時解讀這個序列。引號內直接出現未跳脫的控制字元則是另一回事。Python 的 json decoder 在預設 strict mode 下，會拒絕這類控制字元。</p>
+<p>json.loads 也提供 strict 參數。設定 strict=False 後，decoder 會允許字串內的控制字元。當上游系統輸出非標準 JSON 時，這可能有用，但它不能修復任意的編碼損壞。它只改變 JSON parser 接受哪些字串內容。</p>
+<p>這個差異很重要。遇到 JSON 錯誤時，應該先把它當成 JSON 問題。如果 payload 是有效 JSON，json.loads 已經會處理 JSON 跳脫。之後再套一次其他 escape decoder，可能造成重複解碼，也可能重新解讀從來不該被視為跳脫序列的文字。</p>
+<p><strong>codec 會在不同表示法之間轉換</strong></p>
+<p>UTF-8 是文字編碼。它把 Unicode 文字轉成 bytes，也把有效的 UTF-8 bytes 轉回文字。unicode_escape codec 的目的不同。它的 decoder 會解讀 Python 形式的跳脫序列。對於不屬於跳脫序列的 byte，它不會先把整體當成 UTF-8 文字來解碼，而是用單一 byte 的方式處理。</p>
+<p>因此，把正確字串先用 UTF-8 encode，再把所得 bytes 交給 unicode_escape decode 並不安全。第一步可能把一個非 ASCII 字元變成多個 bytes。第二步則用錯誤規則讀取每個 byte。bytes 還在，但它們原本的意義已經消失。</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-03-con-16-python-unicode-escape/zh-diagram-1.png" alt="正確 Unicode 字串經過錯誤 codec 後變成亂碼的流程"></figure>
+<p><em>把 UTF-8 bytes 交給 unicode_escape，等於用錯誤的契約解讀資料。</em></p>
+<h3>示範</h3>
+<p>假設一個 Python 字串含有正常的中文，後面接著看得見的反斜線與 n。程式只想把那個序列轉成換行。中文部分已經是 Unicode 文字，不需要再次解碼。</p>
+<p>危險的捷徑會先呼叫 UTF-8 encode。每個中文字現在由多個 bytes 表示。接著呼叫 unicode_escape decode。這個 decoder 可以辨識反斜線與 n，但也會按照自己的輸入格式處理其他 bytes。結果可能同時有正確的換行與損壞的中文。只檢查有沒有換行的測試，會漏掉這種破壞。</p>
+<p>ASCII 範例會遮住問題。ASCII 字元在 UTF-8 與許多單一 byte 解讀方式中使用相同數值。所以，hello、反斜線、n、world 這種值看起來會正常。這個測試通過，幾乎無法證明程式能安全處理多語文字。</p>
+<p>我會至少測試四類資料：普通 ASCII、包含預期跳脫序列的文字、不含跳脫序列的非 ASCII 文字，以及緊鄰預期跳脫序列的非 ASCII 文字。我也會加入必須保留的 literal backslash，並為每個案例明確寫出預期輸出。</p>
+<p><strong>strict=False 解決的是更窄的問題</strong></p>
+<p>如果 JSON 產生端在引號內放入真正的換行，預設 json.loads 會因為那是控制字元而拒絕它。strict=False 是告訴 decoder 接受這種輸入。它不是「更積極地解碼 Unicode」，也不會讓後續 unicode_escape 處理變安全。</p>
+<p>接受非標準輸入在受控邊界上可能有用，但也可能掩蓋有問題的產生端。我會記錄這次輸入不符合標準，限制可解析的 payload 大小，並把寬鬆行為留在系統入口附近。程式其他部分應該只收到正常的 Python str。</p>
+<h3>更安全的跳脫處理方式</h3>
+<p><strong>讓格式 parser 處理格式</strong></p>
+<p>來源是 JSON 時，就把完整 JSON value 解析一次。不要先用字串切割取出欄位，再套一個通用 escape decoder。parser 知道引號、反斜線、Unicode escape 與控制字元如何共同構成 JSON。</p>
+<p>來源不是 JSON 時，應該定義應用程式實際支援哪些跳脫序列。例如一個小型設定欄位可能只允許反斜線加 n，以及反斜線加 t。針對性的取代或小型 parser 可以解讀這些序列，同時讓其他字元保持不變。它不像廣泛 codec 那麼聰明，反而更容易理解與測試。</p>
+<p>另一個安全做法，是在資料模型中保留狀態差異。值在某個指定邊界前都標示為 raw escaped text，並只在該邊界解碼一次。通過邊界後，程式把它視為 Unicode 文字，不再解碼。這能避免「這個值是否已經 unescape 過」的模糊問題。</p>
+<p><strong>把 bytes 與文字分開</strong></p>
+<p>讀取檔案、socket 或其他 byte source 時，我會使用 bytes。接著按照來源承諾的 encoding 解碼一次，通常是 UTF-8。從那之後，我只使用 Python str。如果文字內還有跳脫語法，我會分開處理該語法，而不是把整個字串再次轉回 bytes。</p>
+<p>Error handler 也需要同樣謹慎。忽略或替換解碼錯誤可以讓 pipeline 繼續，但也會丟掉調查證據。在系統邊界，清楚失敗並附上短樣本與來源資訊，通常比悄悄改變文字更有用。</p>
+<h3>討論</h3>
+<p><strong>窄範圍處理的優點</strong></p>
+<p>針對性的 parser 有明確契約。它只改變文件中列出的序列，多語文字則原樣通過。測試可以涵蓋所有允許的 escape，未知 escape 也能選擇保留原樣或回報清楚錯誤。</p>
+<p>對 JSON 使用 json.loads 還有另一個好處：同一個 parser 會一起處理結構與字串跳脫，不會多出第二次轉換，也不必猜第一次轉換已經做過什麼。</p>
+<p><strong>缺點與限制</strong></p>
+<p>針對性 parser 比一行捷徑需要多一點程式，也迫使我們決定如何處理不合法輸入。未知 escape 應該失敗、保持不變，還是寫入紀錄？答案取決於系統邊界與資料契約。</p>
+<p>當我無法控制產生端時，strict=False 可能很實用，但它會擴大接受的輸入範圍。我不會把它當成全域習慣。更好的方式是把它記錄為相容性選擇，並用測試展示它準備接受的特定異常 payload。</p>
+<p>更大的教訓是，看得見的文字、Unicode code point、編碼後的 bytes 與跳脫語法是不同層次。某個函式在一層有幫助，到了另一層卻可能在每次呼叫都成功的情況下破壞資料。</p>
+<h3>結論</h3>
+<p>unicode_escape 不是通用的 Unicode 文字修復工具。它按照特定 byte 契約解讀 Python 跳脫語法。先用 UTF-8 encode，再用 unicode_escape decode 的常見捷徑違反了這個契約，可能把正確的非 ASCII 文字變成亂碼。</p>
+<p>對 JSON，我會讓 JSON parser 處理 JSON 跳脫，只在明確決定接受原始控制字元時使用 strict=False。對自訂文字欄位，我只解讀該欄位支援的少數 escape。最重要的是，外部 bytes 只解碼一次，Python 文字則一直保持為文字。</p>
+<h3>其他</h3>
+<p>我想為未來的文字處理程式建立一份小型 regression table。每一列放 raw input 與明確 expected output，並包含中文、日文、emoji、literal backslash、有效 escape、未知 escape 與原始控制字元。我也想讓系統邊界的紀錄標明，值是以 bytes、JSON text，還是已解碼的 Python text 進入。這個小標籤可能省下很長的除錯時間。</p>
+<h3>參考</h3>
+<p><strong>Python JSON 文件</strong></p>
+<p>json — JSON encoder and decoder: <a href="https://docs.python.org/3/library/json.html">https://docs.python.org/3/library/json.html</a></p>
+<p><strong>Python codec 文件</strong></p>
+<p>codecs — Codec registry and base classes: <a href="https://docs.python.org/3/library/codecs.html">https://docs.python.org/3/library/codecs.html</a></p>
+<p>感謝閱讀。有任何問題或建議，歡迎留言，我會看每一則訊息並盡快回覆。</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
