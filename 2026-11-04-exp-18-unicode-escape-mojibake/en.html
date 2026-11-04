@@ -1,0 +1,52 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>41 Tender Names Became Mojibake, and Search Found Nothing</title></head><body>
+<h1>41 Tender Names Became Mojibake, and Search Found Nothing</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-04-exp-18-unicode-escape-mojibake/en-cover.png" alt="41 Tender Names Became Mojibake, and Search Found Nothing"></figure>
+<p>In this blog, I will describe how a permissive parsing fallback quietly damaged Chinese tender names while the crawler kept running.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3><ul><li>Background</li><li>How the corruption happened</li><li>Why search hid the problem</li><li>Diagnosis and recovery</li><li>Discussion</li><li>Conclusion</li><li>Other</li><li>Reference</li></ul>
+<h3>Background</h3>
+<p>I run a crawler for a public procurement website. One part of the crawler reads tender names from JavaScript string literals. Most names are Chinese text. The crawler needs to preserve that text exactly because people search for tenders by the words they saw on the source website.</p>
+<p>The input looked like data that JSON could parse, but some strings ended with a raw tab character. A raw control character is not valid inside a strict JSON string. The normal parser therefore rejected those values.</p>
+<p>The code had a fallback. It took the value, encoded it as UTF-8 bytes, and decoded those bytes with Python's <strong>unicode_escape</strong> codec. The intention was narrow: tolerate the bad character and recover the string. The effect was much wider. It changed the Chinese text itself.</p>
+<h3>How the corruption happened</h3>
+<p>The broken path was conceptually simple. Strict parsing failed on the raw tab. The fallback then ran <strong>value.encode('utf-8').decode('unicode_escape')</strong>. That expression looks reasonable if the input contains backslash escapes. It is unsafe when the same value also contains ordinary non-ASCII text.</p>
+<p>The UTF-8 encoder represents each Chinese character as several bytes. The <strong>unicode_escape</strong> decoder does not reconstruct those bytes as UTF-8 text. It treats the bytes as Latin-1-like input while interpreting escape sequences. As a result, the whole Chinese name becomes mojibake. The fallback did not merely remove or alter the tab at the end.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-04-exp-18-unicode-escape-mojibake/en-diagram-1.png" alt="How strict parsing failure sent Chinese text through the corrupting fallback"></figure><p><em>The failure path: one raw tab sent an otherwise valid Chinese name through the wrong decoder.</em></p>
+<p>This is a dangerous shape of bug because the exception appears to be handled. The crawler does not stop. A record still reaches the database. The field is not empty. From an operational view, the run can look normal while the stored data is wrong.</p>
+<p>In this case, 41 of 155,440 records were affected. New damaged names appeared every week for about two months. The percentage was small, but each affected record had lost the field users needed for discovery.</p>
+<h3>Why search hid the problem</h3>
+<p>A crash would have been easier to notice. A failed run leaves an error. Corrupted search text leaves absence.</p>
+<p>When someone searched with the correct Chinese tender name, the database contained a different byte-to-character interpretation. The query found nothing. That result looked exactly like a tender that did not exist. There was no alert because the crawler had produced a row and the search endpoint had produced a valid empty result.</p>
+<p>This is why data quality needs checks that are different from service health checks. A successful request proves that the service answered. It does not prove that text survived parsing. A non-empty database proves that rows were inserted. It does not prove that their names are readable or searchable.</p>
+<p>The later cleanup made recovery harder. A whitespace normalization step replaced bytes 0x85 and 0xA0 inside the already garbled text. For some records, the usual reversal, <strong>encode('latin-1').decode('utf-8')</strong>, could no longer recreate the original name. Information had been changed twice.</p>
+<h3>Diagnosis and recovery</h3>
+<p>The useful clue was not an exception. It was the visual pattern in the bad names. Mojibake often has repeated characters and punctuation-like fragments because UTF-8 bytes have been interpreted under the wrong character mapping. Once I traced one damaged value back through the parser, the fallback stood out.</p>
+<p>The parser fix used <strong>json.loads(..., strict=False)</strong> for this input. Python's JSON decoder can then accept control characters in strings without sending the entire value through an unrelated text codec. I also added a fallback that rewrites only escape sequences and leaves non-ASCII text untouched.</p>
+<p>Repairing the code was only half of the work. The stored names also needed repair. Since some damaged values had gone through the later whitespace cleanup, reversing the mojibake was not reliable. I re-parsed the names from saved raw pages instead. Those pages were the closest available copy of the original source.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-04-exp-18-unicode-escape-mojibake/en-diagram-2.png" alt="Recovery flow using tolerant JSON parsing and saved raw pages"></figure><p><em>The implemented recovery: parse the original text safely, rebuild affected names, and update the crawler database.</em></p>
+<p>I applied the repair to the crawler's own database as well as the downstream data. That detail mattered. If I had repaired only the visible search database, the next nightly import could have copied the old damaged value back over the correction.</p>
+<h3>Discussion</h3>
+<p><strong>A fallback must preserve more than availability</strong></p>
+<p>The fallback kept the pipeline moving, but it violated the parser's main contract: preserve the source text. Error handling should be judged by what it guarantees after the error, not by whether it avoids an exception.</p>
+<p>For text processing, the encoding boundary must be explicit. Bytes become text once under a known encoding. After that, escape decoding should operate only on the escape syntax that needs attention. Passing a full Unicode value through a byte-oriented escape codec mixes two separate jobs.</p>
+<p><strong>Rare paths deserve real samples</strong></p>
+<p>The problem affected only 41 records out of 155,440. A random spot check could easily miss every one. The failing values shared a feature: a raw tab at the end. Tests for the fallback should include Chinese text, the control character that triggers the fallback, and a check that every other character remains unchanged.</p>
+<p><strong>Empty search results are ambiguous</strong></p>
+<p>An empty result can be correct, or it can be evidence of damaged indexing data. I want to add data-quality checks that count newly garbled names and compare searchable names with the raw source. This is a plan, not part of the completed fix described here.</p>
+<p><strong>Keep raw input when repair may matter</strong></p>
+<p>The saved raw pages made an exact recovery possible. Without them, some names could not be safely reconstructed after the second cleanup step. Retaining source material has storage and privacy costs, so the retention policy should be deliberate. For this incident, the existing copies were the reliable recovery source.</p>
+<h3>Conclusion</h3>
+<p>The crawler did not fail loudly. It accepted a bad control character through a fallback that corrupted the rest of the string. Forty-one tender names became mojibake, and normal search behavior hid the damage as an ordinary empty result.</p>
+<p>The fix was to parse this input with <strong>strict=False</strong>, keep non-ASCII text out of the escape-decoding path, and rebuild names from saved raw pages. I also repaired the crawler database so the nightly import would not restore the bad values.</p>
+<p>My main lesson is simple: a fallback that returns a value is not necessarily a successful fallback. For parsers, success means preserving the meaning of the original text.</p>
+<h3>Other</h3>
+<p>I want to add a small corpus of troublesome source strings to regression tests. It should include raw tabs, escaped characters, Chinese names, and mixed text. I also want a check that flags newly stored names with common mojibake patterns before they reach search.</p>
+<p>A better design would record which parsing path handled each value. That would make fallback use measurable instead of invisible. It would also let me review new fallback cases before they accumulate for weeks.</p>
+<h3>Reference</h3>
+<p><strong>Python JSON documentation</strong></p>
+<p>json — JSON encoder and decoder: <a href="https://docs.python.org/3/library/json.html">https://docs.python.org/3/library/json.html</a></p>
+<p><strong>Python codecs documentation</strong></p>
+<p>codecs — Codec registry and base classes: <a href="https://docs.python.org/3/library/codecs.html">https://docs.python.org/3/library/codecs.html</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p><p>ChihSheng, Feng (Mike)</p><p>馮 志聖(マイク)</p>
+</body></html>
