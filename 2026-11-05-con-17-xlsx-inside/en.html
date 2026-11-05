@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>What Is Inside an XLSX File, and Why a Cut-Off Save Breaks It</title></head>
+<body>
+<h1>What Is Inside an XLSX File, and Why a Cut-Off Save Breaks It</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-05-con-17-xlsx-inside/en-cover.png" alt="What Is Inside an XLSX File, and Why a Cut-Off Save Breaks It"></figure>
+<p>In this blog, I will open the XLSX box and explain why one interrupted save can make a whole workbook look unreadable.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Introduction</li>
+<li>Overview</li>
+<li>The ZIP layer</li>
+<li>The XML parts</li>
+<li>Why a cut-off save breaks the package</li>
+<li>Recovery with Python</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Introduction</h3>
+<p>An XLSX file looks like one document in Finder or File Explorer. Internally, it is a package. The package contains several XML files and other resources inside a ZIP archive. Those parts describe the workbook, worksheets, strings, styles, and relationships between files.</p>
+<p>This matters when a save is interrupted. A spreadsheet application may have written much of the new content but not completed the archive. The file can then fail with a message such as “File is not a zip file.” That message sounds as if every cell has disappeared. Sometimes the useful XML parts are still present. The package around them is what failed.</p>
+<p>I do not treat that as a promise of recovery. A damaged archive may contain complete parts, partial parts, or no usable parts. The first job is to preserve the original and inspect what remains.</p>
+<h3>Overview</h3>
+<p>Office Open XML is the document format family behind XLSX. ECMA-376 defines its vocabularies, document representation, and packaging. The packaging rules let one logical document contain many named parts.</p>
+<p>A typical workbook can contain a workbook definition, one XML part per worksheet, style information, relationships, and content-type declarations. It may also contain shared strings, drawings, charts, comments, and other parts. The exact set depends on the workbook.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-05-con-17-xlsx-inside/en-diagram-1.png" alt="How an XLSX package connects ZIP structure, XML content, and the central directory"></figure>
+<p><em>An XLSX reader needs both readable package parts and enough ZIP structure to locate them.</em></p>
+<p>The diagram is intentionally simple. XLSX is not one long XML document. It is a group of parts, and the ZIP layer gives readers a directory of those parts.</p>
+<h3>The ZIP layer</h3>
+<p>A ZIP archive stores entries such as files and folders. Python’s zipfile module can list entries, read them, and test whether a file looks like a valid ZIP archive. When the structure is valid, ZipFile gives each member a name and metadata through ZipInfo.</p>
+<p>ZIP readers normally depend on the central directory near the end of the archive. That directory tells the reader which entries exist and where to find them. A final record points to the central directory. If a write stops before those records are complete, a normal reader may not know how to navigate the archive even when earlier local file records and compressed data remain on disk.</p>
+<p>This explains the confusing symptom. The operating system can see a large file. A hex viewer may show XML names and readable text. Yet Excel, openpyxl, or zipfile may reject it because the package index is missing or inconsistent.</p>
+<p>Renaming the file from .xlsx to .zip does not repair anything. The rename only makes the real format easier to recognize. A copy can be inspected with archive tools, while the original should remain untouched.</p>
+<h3>The XML parts</h3>
+<p>The root file [Content_Types].xml tells consumers which content types appear in the package. Relationship files connect parts. The workbook part identifies sheets and uses relationships to point toward their worksheet parts. Worksheet XML contains rows, cells, formulas, and references to values.</p>
+<p>Text needs special attention. Some workbooks use a shared string table. In that design, a cell can store an index, and the actual text lives in a separate sharedStrings.xml part. Recovery then needs both the worksheet and the matching string table. If the index survives but the string table does not, the cell’s text cannot be reconstructed from that index alone.</p>
+<p>Other workbooks use inline strings. The text is stored directly inside the cell element in the worksheet XML. Inline strings can make a worksheet more self-contained during recovery, although formulas, formatting, relationships, and other workbook behavior still depend on other parts.</p>
+<p>Styles are separate too. A recovered cell value does not guarantee that its date, currency, percentage, or visual formatting will return correctly. The number in the cell and the style that tells an application how to display it are different pieces of information.</p>
+<h3>Why a cut-off save breaks the package</h3>
+<p>Saving a workbook is not the same as appending a plain text line. The writer creates or replaces package parts, writes ZIP entry data, and finishes the archive metadata. If the process stops during that sequence, the result depends on the exact interruption point.</p>
+<p>An early interruption may leave a short file with little useful content. A later interruption may leave many complete XML entries but an incomplete central directory. Another failure may preserve the directory while truncating one worksheet entry. These cases look similar to a user because the workbook will not open, but the recovery options differ.</p>
+<p>Writing directly over the only good copy increases the risk. A safer design writes a new workbook to a temporary file in the same directory, completes and validates it, then replaces the target. This does not make every storage failure impossible. It does keep an interrupted write from immediately destroying the last complete file in the common case.</p>
+<h3>Recovery with Python</h3>
+<p>I would start by copying the damaged file and working only on the copy. Then I would ask zipfile.is_zipfile whether Python recognizes it. If it does, I would open it with ZipFile, list the members, and run the archive test method. That separates a package that opens but has a damaged member from one whose ZIP structure cannot be opened at all.</p>
+<p>If the archive opens, I would inspect [Content_Types].xml, the workbook relationships, worksheet parts, and the string representation. I would not begin by loading it into openpyxl and saving it again. openpyxl is useful for valid or sufficiently valid workbooks, but a save creates a new interpretation of the workbook. It is not a forensic copy operation.</p>
+<p>If zipfile rejects the package, recovery becomes a lower-level task. An archive repair tool may rebuild directory information from surviving local records. After repair, I would extract the package into a new directory and parse XML defensively. I would expect missing parts and broken relationships. I would also treat formulas, external links, macros, images, and styles as separate recovery questions rather than assuming that recovered cell values mean the workbook is complete.</p>
+<p>For data recovery, a small script can walk worksheet rows and resolve either inline strings or shared-string indexes. The script should log every skipped cell and every missing dependency. It should write recovered data to a new file. It should never overwrite the damaged source.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits of understanding the package</strong></p>
+<p>The package model turns a vague “Excel file is broken” problem into smaller checks. Can the ZIP directory be read? Which members exist? Does the workbook point to the worksheets? Are strings inline or shared? Are cell values intact even if styles are gone?</p>
+<p>It also helps with normal engineering. A program that creates XLSX files can validate the completed temporary file before replacement. Tests can interrupt a save and confirm that the previous workbook remains readable.</p>
+<p><strong>Drawbacks and limits</strong></p>
+<p>XML recovery can preserve data while losing behavior. A workbook may depend on formulas, named ranges, charts, links, validation rules, or formatting. Reading visible cell values is only one layer.</p>
+<p>There is also a security concern. A damaged or untrusted workbook is still untrusted input. Python’s zipfile documentation warns about resource limits during decompression, and openpyxl documents XML-related risks. Recovery tooling should limit file sizes, extracted paths, entry counts, and memory use. It should not blindly extract archive names into arbitrary paths.</p>
+<h3>Conclusion</h3>
+<p>An XLSX file is a ZIP package of connected parts. Worksheet data, shared strings, styles, relationships, and content declarations each have a role. A cut-off save can break the directory that ties the archive together even when some XML remains.</p>
+<p>The practical response is simple: preserve the source, inspect the ZIP layer, identify surviving parts, and recover into a new file. For prevention, write to a temporary file and replace the target only after the new package is complete and readable.</p>
+<h3>Other</h3>
+<p>I want to build a small diagnostic tool that reports package health without modifying the workbook. It would list required parts, identify shared versus inline strings, test each ZIP member, and produce a recovery checklist. I also want to add failure-injection tests that stop a writer at different points and confirm that the previous file remains available.</p>
+<h3>Reference</h3>
+<p><strong>Office Open XML standard</strong></p>
+<p>ECMA-376 Office Open XML: <a href="https://ecma-international.org/publications-and-standards/standards/ecma-376/">https://ecma-international.org/publications-and-standards/standards/ecma-376/</a></p>
+<p><strong>Python archive tools</strong></p>
+<p>zipfile — Work with ZIP archives: <a href="https://docs.python.org/3/library/zipfile.html">https://docs.python.org/3/library/zipfile.html</a></p>
+<p><strong>Python spreadsheet tools</strong></p>
+<p>openpyxl documentation: <a href="https://openpyxl.readthedocs.io/en/stable/">https://openpyxl.readthedocs.io/en/stable/</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
