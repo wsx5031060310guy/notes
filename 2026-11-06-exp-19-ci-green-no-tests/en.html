@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>CI Was Green, but 973 Tests Had Never Run There</title></head>
+<body>
+<h1>CI Was Green, but 973 Tests Had Never Run There</h1>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-06-exp-19-ci-green-no-tests/en-cover.png" alt="CI Was Green, but 973 Tests Had Never Run There"></figure>
+<p>In this blog, I will describe how a green pull request hid the fact that 973 tests had never run in CI.</p>
+<p>Disclosure: I drafted this post with AI assistance from my own project notes, and I review it before publishing.</p>
+<h3>Content</h3>
+<ul>
+<li>Background</li>
+<li>What green actually meant</li>
+<li>Adding the missing test job</li>
+<li>Three environment differences</li>
+<li>A shell step that hid failure</li>
+<li>Discussion</li>
+<li>Conclusion</li>
+<li>Other</li>
+<li>Reference</li>
+</ul>
+<h3>Background</h3>
+<p>I opened a pull request and saw every check turn green. The status looked reassuring. The code passed a Python syntax check, and the preview deployment completed. Nothing on the page was red.</p>
+<p>But the check list did not include the project test suite. The project had 973 tests, and they had only ever run on one developer machine. The pull request was green because the checks that existed had passed. It did not mean that the application behavior had been tested in CI.</p>
+<p>This distinction sounds obvious after I write it down. It was less obvious while looking at a familiar green status. A color summarizes outcomes. It does not explain the scope of those outcomes. The names beside the color contain that information.</p>
+<h3>What green actually meant</h3>
+<p>The pull request had two useful checks. The Python syntax check could catch invalid Python syntax. The preview deployment could show whether the preview build and deployment path completed. Both checks had value. Neither one ran the test suite.</p>
+<p>I had mentally expanded “all checks passed” into “the change was tested.” That was not what the system reported. It only reported that all configured checks passed. A missing test job cannot fail. It also cannot provide evidence.</p>
+<p>The number of tests made the gap more important, not less. There were 973 test cases already available. They represented a large body of expected behavior, but their protection stopped at the developer machine where they had always run. The repository did not yet prove that a clean CI runner could execute them.</p>
+<p>The first lesson was to read the name of every required check. “Syntax” is not “tests.” “Preview” is not “tests.” A green group is meaningful only when I know what is inside the group.</p>
+<h3>Adding the missing test job</h3>
+<p>I added the test suite to GitHub Actions. This did more than move an existing local command into a YAML file. A hosted runner started from a different environment. That difference exposed assumptions that one developer machine had made invisible.</p>
+<figure><img src="https://wsx5031060310guy.github.io/notes/2026-11-06-exp-19-ci-green-no-tests/en-diagram-1.png" alt="Observed path from green pull request checks to the added CI test job and explicit install verification"></figure>
+<p><em>The observed path moved from two green checks with no tests to a test job with separate install commands and an extension version check.</em></p>
+<p>The first CI runs were therefore useful even when they did not reach a clean test result. They showed where the project depended on local state, local package versions, and shell behavior. Those failures were not random CI problems. They were information about portability.</p>
+<p>I did not need a large CI redesign to begin learning. I needed the test command to run in a fresh environment and the setup steps to report failure honestly.</p>
+<h3>Three environment differences</h3>
+<p><strong>The database address was different</strong></p>
+<p>A database safety check saw “::1/128” over TCP instead of the address it expected. The check was doing an important job: it tried to prevent tests from using the wrong database. On the developer machine, its address assumption had held. On the runner, the connection resolved differently.</p>
+<p>The correct response was not to remove the safety check. The mismatch showed that the rule was tied to one environment’s network representation. CI forced that hidden assumption into view. A safety rule still needs to protect the database, but it must evaluate the actual connection context rather than one remembered address.</p>
+<p><strong>The packaged extension was too old</strong></p>
+<p>The Ubuntu pgvector package supplied version 0.6. The tests needed features newer than that package provided. Local development had an environment where those features were available, so this dependency gap had not appeared there.</p>
+<p>This is a common boundary in automation. Installing a package by name proves that something was installed. It does not prove that the installed version has the capabilities the application expects. The test runner made the required capability visible because the tests exercised it.</p>
+<p><strong>The source build chose a missing compiler</strong></p>
+<p>Building pgvector from source then tried to use clang-19, which was absent on the runner. This was another local assumption. A source build depends on more than source code. It also depends on the selected compiler and the runner’s toolchain.</p>
+<p>These three differences came from one change: running the existing tests somewhere new. The database check, extension package, and compiler selection had all worked together on one machine. CI separated “works here” from “can be reproduced on a clean runner.”</p>
+<h3>A shell step that hid failure</h3>
+<p>The most dangerous problem was not an unavailable package. It was a setup step that appeared to succeed after part of it failed.</p>
+<p>The step used “make &amp;&amp; sudo make install.” In the observed run, the job did not fail when “make” failed. That meant the workflow could continue without proving that the requested extension had been built and installed correctly.</p>
+<p>I changed each command to its own line. I then added a check for the installed extension version. The setup no longer depended only on the final appearance of an install command. It had to expose each operation and verify the artifact that the tests would use.</p>
+<p>This was a small change with a clear purpose. Separate lines made the sequence easier to read in the workflow and logs. The version check answered the more important question: what extension did the runner actually install?</p>
+<p>A successful setup step is not the same as a correct environment. Exit status is necessary, but verification closes the gap between an attempted command and the dependency the application receives.</p>
+<h3>Discussion</h3>
+<p><strong>Benefits</strong></p>
+<p>Putting the 973 tests in GitHub Actions changed them from local evidence into shared evidence. A pull request could now exercise application behavior in a fresh environment instead of relying only on syntax and deployment checks.</p>
+<p>The failures also improved the setup path. They identified an address assumption, a package capability gap, a compiler mismatch, and a shell step that did not fail as expected. Each issue was easier to discuss because CI reproduced it in one visible sequence.</p>
+<p><strong>Drawbacks and limits</strong></p>
+<p>A CI test job adds setup time and maintenance. Database services, extensions, and build tools must be declared accurately. Runner images can differ from a developer machine, and package repositories may not provide the capabilities a project needs.</p>
+<p>CI also does not make every green status complete. Even after a test job exists, its value depends on which tests run, which commands can be skipped, and which environment is represented. The same lesson still applies: read the check names and inspect what each check does.</p>
+<h3>Conclusion</h3>
+<p>The pull request was green, but green described only a syntax check and a preview deployment. It did not describe the 973 tests because no CI job ran them.</p>
+<p>Adding the tests revealed four hidden assumptions: a database address expected by a safety check, an Ubuntu pgvector package older than the tests needed, a source build that selected a missing compiler, and a shell step that did not stop the job when the build failed. Moving commands onto separate lines and checking the installed extension version made the setup more explicit.</p>
+<p>My main lesson is simple. I should not read only the color of CI. I should read every check name, confirm that the test suite is present, and verify the environment that the tests actually use.</p>
+<h3>Other</h3>
+<p>I want future pull request reviews to begin with scope: which checks ran, which behavior they covered, and which dependencies they verified. A green status is the end of that reading process, not the beginning.</p>
+<p>Tags: CI/CD, GitHub Actions, Testing, PostgreSQL, DevOps</p>
+<h3>Reference</h3>
+<p><strong>GitHub Actions</strong></p>
+<p>GitHub Actions documentation: <a href="https://docs.github.com/en/actions">https://docs.github.com/en/actions</a></p>
+<p><strong>PostgreSQL</strong></p>
+<p>PostgreSQL documentation: <a href="https://www.postgresql.org/docs/">https://www.postgresql.org/docs/</a></p>
+<p><strong>pgvector</strong></p>
+<p>pgvector documentation: <a href="https://github.com/pgvector/pgvector">https://github.com/pgvector/pgvector</a></p>
+<p>Thanks for reading. I would love to hear your feedback — feel free to leave a comment if you have a question or a recommendation. I read every message and try to answer as soon as I can.</p>
+<p>Sainso Technology (聖索科技) · Founder</p>
+<p>ChihSheng, Feng (Mike)</p>
+<p>馮 志聖(マイク)</p>
+</body>
+</html>
